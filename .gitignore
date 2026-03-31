@@ -35,3 +35,4 @@ local_*
 
 # ── Symlink (user creates locally: ln -sf common/assets assets) ──
 /assets
+# end of file
