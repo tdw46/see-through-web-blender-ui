@@ -140,6 +140,41 @@ python inference/scripts/heuristic_partseg.py seg_wdepth --srcp workspace/test_s
 python inference/scripts/heuristic_partseg.py seg_wlr --srcp workspace/test_samples_output/PV_0047_A0020_wdepth.psd --target_tags handwear-1
 ```
 
+### Low-VRAM Users
+
+The default pipeline runs at bf16 precision and requires approximately 12-16 GB of VRAM at 1280 resolution.
+
+**12 GB GPUs**: Enable group offload to reduce peak VRAM to ~10 GB at 1280 resolution:
+
+```bash
+python inference/scripts/inference_psd.py \
+  --srcp assets/test_image.png \
+  --save_to_psd \
+  --group_offload
+```
+
+**8 GB GPUs**: Use the NF4 quantized pipeline, which uses 4-bit quantized model weights. This achieves ~8 GB peak VRAM at 1280 resolution, and can be further reduced by lowering the resolution with group offload:
+
+```bash
+# Install bitsandbytes (one-time)
+pip install -r requirements-inference-bnb.txt
+
+# Run with NF4 quantization (default: group_offload on, depth resolution 720)
+python inference/scripts/inference_psd_quantized.py \
+  --srcp assets/test_image.png \
+  --save_to_psd
+
+# For even lower VRAM, reduce layerdiff resolution to 1024
+python inference/scripts/inference_psd_quantized.py \
+  --srcp assets/test_image.png \
+  --save_to_psd \
+  --resolution 1024
+```
+
+The quantized models are hosted on HuggingFace and downloaded automatically on first run. Quality is close to the full-precision model (PSNR ~30 dB, SSIM ~0.96 vs bf16 baseline).
+
+> **Note:** Group offload trades speed for VRAM savings (roughly 1.5x slower). NF4 quantization has minimal speed overhead but reduces model weight memory.
+
 ### Preparing the dataset for training (e.g., Live2D Parsing)
 
 We have provided a separate repo for you to prepare the dataset for training the Live2D parsing model. Please refer to [CubismPartExtr](https://github.com/shitagaki-lab/CubismPartExtr) to know how to download the sample model files and prepare your workspace folder. 
@@ -194,6 +229,11 @@ the full Image-to-Live2D pipeline requires significantly more:
 That said, we believe our decomposition can serve as a useful **starting point** for
 Live2D artists by eliminating some of the most tedious part of the workflow, such as manual segmentation
 and occluded region inpainting.
+
+## Changelog
+
+**2026-04-02**
+- Multiple memory optimizations; added suggestions for low-VRAM users (group offload, NF4 quantization).
 
 ## Acknowledgements
 
