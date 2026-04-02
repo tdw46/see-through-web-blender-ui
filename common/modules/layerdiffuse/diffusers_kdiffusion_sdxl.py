@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Union, List, Optional
+import gc
 
-import PIL.Image
 import numpy as np
 from tqdm.auto import trange
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl_img2img import *
@@ -133,6 +133,8 @@ class KDiffusionStableDiffusionXLPipeline(StableDiffusionXLImg2ImgPipeline):
         # self.register_to_config(tag_list=tag_list)
         self.register_modules(trans_vae=trans_vae)
 
+        self._cached_prompt_embeds = {}
+
     @property
     def do_classifier_free_guidance(self):
         return self._guidance_scale > 1 and self.unet.config.time_cond_proj_dim is None
@@ -171,6 +173,66 @@ class KDiffusionStableDiffusionXLPipeline(StableDiffusionXLImg2ImgPipeline):
         # prompt_embeds = prompt_embeds.to(dtype=self.unet.dtype, device=device)
 
         return prompt_embeds, pooled_prompt_embeds
+
+    def encode_cropped_prompt_77tokens_cached(self, prompt: Union[str, List]):
+        if isinstance(prompt, str):
+            prompt = [prompt]
+
+        input_prompts = []
+        _cached_prompt_embeds = {}
+        for p in prompt:
+            if p not in self._cached_prompt_embeds:
+                input_prompts.append(p)
+            else:
+                _cached_prompt_embeds[p] = self._cached_prompt_embeds[p]
+        if len(input_prompts) > 0:
+            prompt_embeds, pooled_prompt_embeds = self.encode_cropped_prompt_77tokens(input_prompts)
+            for ii in range(len(input_prompts)):
+                _cached_prompt_embeds[input_prompts[ii]] = [prompt_embeds[[ii]].cpu(), pooled_prompt_embeds[[ii]].cpu()]
+        
+        prompt_embeds_out, pooled_prompt_embeds_out = [], []
+        for ii in range(len(prompt)):
+            prompt_embeds, pooled_prompt_embeds = _cached_prompt_embeds[prompt[ii]]
+            prompt_embeds_out.append(prompt_embeds)
+            pooled_prompt_embeds_out.append(pooled_prompt_embeds)
+
+        pooled_prompt_embeds_out = torch.cat(pooled_prompt_embeds_out)
+        prompt_embeds_out = torch.cat(prompt_embeds_out)
+        return prompt_embeds_out, pooled_prompt_embeds_out
+
+    def cache_tag_embeds(self, unload_textencoders=True):
+        tag_version = self.unet.get_tag_version()
+        if tag_version == 'v3' and len(self._cached_prompt_embeds) == 0:
+            body_tag_list = ['front hair', 'back hair', 'head', 'neck', 'neckwear', 'topwear', 'handwear', 'bottomwear', 'legwear', 'footwear', 'tail', 'wings', 'objects']
+            head_tag_list = ['headwear', 'face', 'irides', 'eyebrow', 'eyewhite', 'eyelash', 'eyewear', 'ears', 'earwear', 'nose', 'mouth']
+            prompt_embeds, pooled_prompt_embeds = self.encode_cropped_prompt_77tokens(body_tag_list)
+            for ii in range(len(body_tag_list)):
+                self._cached_prompt_embeds[body_tag_list[ii]] = [prompt_embeds[[ii]].cpu(), pooled_prompt_embeds[[ii]].cpu()]
+            prompt_embeds, pooled_prompt_embeds = self.encode_cropped_prompt_77tokens(head_tag_list)
+            for ii in range(len(head_tag_list)):
+                self._cached_prompt_embeds[head_tag_list[ii]] = [prompt_embeds[[ii]].cpu(), pooled_prompt_embeds[[ii]].cpu()]
+        elif len(self._cached_prompt_embeds) == 0:
+            body_tag_list = [
+                'hair', 'headwear', 'face', 'eyes', 'eyewear', 'ears', 'earwear', 'nose', 'mouth', 
+                'neck', 'neckwear', 'topwear', 'handwear', 'bottomwear', 'legwear', 'footwear', 
+                'tail', 'wings', 'objects'
+            ]
+            prompt_embeds, pooled_prompt_embeds = self.encode_cropped_prompt_77tokens(body_tag_list)
+            for ii in range(len(body_tag_list)):
+                self._cached_prompt_embeds[body_tag_list[ii]] = [prompt_embeds[[ii]].cpu(), pooled_prompt_embeds[[ii]].cpu()]
+        else:
+            unload_textencoders = False
+
+        if unload_textencoders:
+            self.text_encoder.cpu()
+            self.text_encoder_2.cpu()
+            del self.text_encoder
+            del self.text_encoder_2
+            # to supress some warning msg
+            self.text_encoder = self.text_encoder_2 = torch.nn.Identity()
+            gc.collect()
+            torch.cuda.empty_cache()
+        
     
     def denoise_func(self, latents, add_text_embeds, add_time_ids, prompt_embeds, c_concat, num_inference_steps=50):
 
@@ -218,6 +280,11 @@ class KDiffusionStableDiffusionXLPipeline(StableDiffusionXLImg2ImgPipeline):
                     latents = latents.to(latents_dtype)
 
         return latents
+
+
+    @property
+    def device(self) -> torch.device:
+        return self.unet.device
 
     @torch.inference_mode()
     def __call__(
@@ -274,7 +341,7 @@ class KDiffusionStableDiffusionXLPipeline(StableDiffusionXLImg2ImgPipeline):
             initial_latent = initial_latent[:, None].expand(-1, num_frames, -1, -1, -1)
 
         if prompt is not None:
-            prompt_embeds, pooled_prompt_embeds = self.encode_cropped_prompt_77tokens(prompt)
+            prompt_embeds, pooled_prompt_embeds = self.encode_cropped_prompt_77tokens_cached(prompt)
 
         if negative_prompt is not None and self.do_classifier_free_guidance:
             negative_prompt_embeds, negative_pooled_prompt_embeds = self.encode_cropped_prompt_77tokens(negative_prompt)
