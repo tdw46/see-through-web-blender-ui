@@ -96,7 +96,7 @@ We have prepared [a Huggingface Space](https://huggingface.co/spaces/24yearsold/
 
 <img alt="image" src="https://github.com/user-attachments/assets/3f98f47b-e98b-4628-9859-8772cda69f93" />
 
-(Copyright [Tohoku Zunko Project](https://zunko.jp/)
+(Copyright [Tohoku Zunko Project](https://zunko.jp/).)
 
 
 ## Usage
