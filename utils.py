@@ -20,14 +20,37 @@ import bpy
 
 DEPENDENCY_MARKERS = (
     "torch",
-    "gradio",
+    "torchvision",
+    "torchaudio",
+    "bitsandbytes",
     "webview",
-    "diffusers",
-    "transformers",
     "numpy",
+    "cv2",
+    "PIL",
+    "pillow_jxl",
+    "yaml",
+    "scipy",
+    "sklearn",
+    "skimage",
+    "einops",
+    "pandas",
+    "transformers",
+    "diffusers",
+    "huggingface_hub",
+    "tokenizers",
+    "accelerate",
+    "safetensors",
+    "kornia",
+    "timm",
+    "pytorch_grad_cam",
+    "pycocotools",
+    "psd_tools",
+    "tqdm",
+    "colorama",
+    "matplotlib",
 )
 
-PROBE_MODULES = ("torch", "webview", "gradio")
+PROBE_MODULES = ("torch", "webview", "PIL", "numpy", "diffusers")
 _PROBE_CACHE: dict[tuple[str, str], tuple[bool, str]] = {}
 _SHARED_DEPENDENCY_CACHE: tuple[float, list[Path]] | None = None
 _SHARED_WHEEL_CACHE: tuple[float, list[Path]] | None = None

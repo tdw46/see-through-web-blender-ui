@@ -58,8 +58,8 @@ DEPENDENCY_GROUPS: tuple[DependencyGroup, ...] = (
         key="ui",
         label="UI Essentials",
         requirements_file="wheels/requirements/ui.txt",
-        modules=("webview", "gradio"),
-        description="Installs the native pywebview shell and the Gradio-based tool UI.",
+        modules=("webview",),
+        description="Installs the native pywebview shell used by the Hallway Avatar Gen window.",
     ),
     DependencyGroup(
         key="inference_base",
@@ -118,7 +118,6 @@ DEPENDENCY_GROUPS: tuple[DependencyGroup, ...] = (
 REQUIREMENT_IMPORTS_BY_GROUP: dict[str, tuple[str, ...]] = {
     "ui": (
         "webview",
-        "gradio",
     ),
     "inference_base": (
         "numpy",
@@ -336,7 +335,7 @@ def _module_available(name: str) -> bool:
     if cached and now - cached[0] <= _STATUS_CACHE_TTL:
         return cached[1]
 
-    if name in {"torch", "torchvision", "torchaudio", "webview", "gradio"}:
+    if name in {"torch", "torchvision", "torchaudio", "webview"}:
         payload = _probe_runtime_payload("import", name)
         available = bool(payload.get("ok"))
     else:

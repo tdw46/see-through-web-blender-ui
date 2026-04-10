@@ -15,7 +15,22 @@ import os.path as osp
 import argparse
 import sys
 import os
-sys.path.append(osp.dirname(osp.dirname(osp.abspath(__file__))))
+from pathlib import Path
+
+SCRIPT_PATH = Path(__file__).resolve()
+INFERENCE_ROOT = SCRIPT_PATH.parents[1]
+EXTENSION_ROOT = SCRIPT_PATH.parents[2]
+COMMON_ROOT = EXTENSION_ROOT / 'common'
+
+# Keep the shared inference package roots ahead of the Blender add-on root so
+# imports like `from utils.cv ...` resolve to `common/utils` instead of the
+# add-on's Blender-only `utils.py`.
+preferred_paths = [str(COMMON_ROOT), str(INFERENCE_ROOT), str(EXTENSION_ROOT)]
+for candidate in preferred_paths:
+    if candidate in sys.path:
+        sys.path.remove(candidate)
+for candidate in reversed(preferred_paths):
+    sys.path.insert(0, candidate)
 
 default_n_threads = 8
 os.environ['OPENBLAS_NUM_THREADS'] = f"{default_n_threads}"

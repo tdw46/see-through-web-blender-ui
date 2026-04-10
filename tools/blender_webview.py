@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import socket
 import sys
 import threading
 import time
@@ -36,13 +35,58 @@ else:
     AppHelper = None
     cocoa_platform = None
 
-from tools.webui import CUSTOM_CSS, build_demo, theme
+from tools.webui import APP_HTML, HallwayWebApp
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _inject_js(window, js_code: str) -> None:
+    try:
+        window.evaluate_js(js_code)
+    except Exception as error:
+        print(f"Hallway Avatar Gen webview: JS inject error: {error}", flush=True)
+
+
+def _inject_console_bridge(window) -> None:
+    bridge_js = r"""
+(function() {
+  if (window.__hagConsoleBridge) return;
+  window.__hagConsoleBridge = true;
+  const send = (level, args) => {
+    try {
+      if (window.pywebview && window.pywebview.api && window.pywebview.api.on_console) {
+        window.pywebview.api.on_console({level: level, args: args});
+      }
+    } catch (e) {}
+  };
+  ['log', 'warn', 'error', 'info', 'debug'].forEach(level => {
+    const orig = console[level];
+    console[level] = function(...args) {
+      try { send(level, args); } catch (e) {}
+      try { orig.apply(console, args); } catch (e) {}
+    };
+  });
+  window.addEventListener('error', function(e) {
+    try {
+      const target = e.target || e.srcElement;
+      if (target && target !== window) {
+        const src = target.currentSrc || target.src || target.href || target.baseURI || '';
+        send('error', ['resource-error', target.tagName || 'unknown', src]);
+        return;
+      }
+      send('error', [e.message || 'error', e.filename || '', e.lineno || 0, e.colno || 0]);
+    } catch (ex) {}
+  }, true);
+  window.addEventListener('unhandledrejection', function(e) {
+    try {
+      send('error', ['unhandledrejection', e.reason && (e.reason.message || e.reason) || e.reason]);
+    } catch (ex) {}
+  });
+})();
+"""
+    _inject_js(window, bridge_js)
+
+
+def _start_console_bridge(window) -> None:
+    _inject_console_bridge(window)
 
 
 def _raise_window_on_launch(window) -> None:
@@ -79,7 +123,7 @@ def _raise_window_on_launch(window) -> None:
                     except Exception:
                         pass
                 except Exception as error:
-                    print(f"Hallway Avatar Gen webview: mac focus error: {error}")
+                    print(f"Hallway Avatar Gen webview: mac focus error: {error}", flush=True)
 
             def _normalize_window_level() -> None:
                 try:
@@ -108,35 +152,35 @@ def _raise_window_on_launch(window) -> None:
         time.sleep(0.8)
         window.on_top = False
     except Exception as error:
-        print(f"Hallway Avatar Gen webview: raise window error: {error}")
+        print(f"Hallway Avatar Gen webview: raise window error: {error}", flush=True)
 
 
 def main() -> int:
-    port = _free_port()
-    url = f"http://127.0.0.1:{port}"
+    print("Hallway Avatar Gen webview: helper booting", flush=True)
+    js_api = HallwayWebApp()
 
-    def _launch_gradio() -> None:
-        demo = build_demo()
-        demo.queue()
-        demo.launch(
-            inbrowser=False,
-            server_name="127.0.0.1",
-            server_port=port,
-            prevent_thread_lock=True,
-            css=CUSTOM_CSS,
-            theme=theme,
-        )
+    def _on_loaded(window) -> None:
+        print("Hallway Avatar Gen webview: window loaded", flush=True)
+        _start_console_bridge(window)
+        try:
+            window.evaluate_js("window.dispatchEvent(new Event('pywebviewready'));")
+        except Exception as error:
+            print(f"Hallway Avatar Gen webview: pywebviewready dispatch error: {error}", flush=True)
 
-    server_thread = threading.Thread(target=_launch_gradio, daemon=True)
-    server_thread.start()
-
-    time.sleep(2.0)
-    window = webview.create_window("Hallway Avatar Gen", url, width=1480, height=980)
+    window = webview.create_window(
+        "Hallway Avatar Gen",
+        html=APP_HTML,
+        width=1480,
+        height=980,
+        js_api=js_api,
+        text_select=True,
+    )
+    js_api.bind_window(window)
     try:
         window.shown += lambda: _raise_window_on_launch(window)
     except Exception:
         pass
-    webview.start(debug=False)
+    webview.start(_on_loaded, (window,), debug=False)
     return 0
 
 

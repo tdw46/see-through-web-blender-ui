@@ -1,2 +1,1 @@
 pywebview==3.4
-gradio==6.11.0
