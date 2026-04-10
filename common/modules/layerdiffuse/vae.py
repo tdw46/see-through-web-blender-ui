@@ -229,6 +229,8 @@ class TransparentVAEDecoder(torch.nn.Module):
             break
 
         result = torch.stack(result, dim=0)
+        if result.shape[0] == 1:
+            return result[0]
         median = torch.median(result, dim=0).values
         return median
 

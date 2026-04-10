@@ -503,6 +503,24 @@ class HallwayWebApp:
             )
         return self._snapshot()
 
+    def set_controls(self, updates: dict[str, object] | None = None) -> dict[str, object]:
+        updates = updates or {}
+        with self._lock:
+            controls = dict(self.state.get("controls") or {})
+            if "device" in updates:
+                controls["device"] = str(updates.get("device") or controls.get("device") or "auto")
+            if "quant_mode" in updates:
+                controls["quant_mode"] = str(updates.get("quant_mode") or controls.get("quant_mode") or "auto")
+            if "resolution" in updates:
+                resolution = int(updates.get("resolution") or controls.get("resolution") or 1024)
+                controls["resolution"] = max(512, min(2048, round(resolution / 64) * 64))
+            if "seed" in updates:
+                controls["seed"] = int(updates.get("seed") or controls.get("seed") or 42)
+            if "tblr_split" in updates:
+                controls["tblr_split"] = bool(updates.get("tblr_split"))
+            self.state["controls"] = controls
+        return self._snapshot()
+
     def start_inference(self, options: dict[str, object] | None = None) -> dict[str, object]:
         options = options or {}
         with self._lock:
@@ -594,6 +612,7 @@ class HallwayWebApp:
             env["HF_HOME"] = str(HF_CACHE_DIR)
             env["PYTHONPATH"] = _subprocess_pythonpath()
             env["PYTHONUNBUFFERED"] = "1"
+            env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
             start_time = time.time()
 
             with log_path.open("w", encoding="utf-8") as log_file:
@@ -611,16 +630,23 @@ class HallwayWebApp:
                     elapsed_str = f"{int(elapsed // 60)}:{int(elapsed % 60):02d}"
                     log_status = parse_log_status(log_path)
                     update_note = log_update_note(log_path)
-                    layer_count = len(collect_layers(layer_dir))
+                    live_gallery = _gallery_payload(layer_dir)
+                    layer_count = len(live_gallery)
                     status_text = f"{log_status}\nElapsed: {elapsed_str}"
                     if update_note:
                         status_text += f"\n{update_note}"
                     if layer_count:
                         status_text += f"\nLayers ready: {layer_count}"
-                    self._set_state(status_text=status_text, output_dir=str(save_dir), error="")
+                    self._set_state(
+                        status_text=status_text,
+                        output_dir=str(save_dir),
+                        error="",
+                        gallery=live_gallery,
+                    )
 
             if process.returncode != 0:
                 err_tail = _safe_error_tail(log_path)
+                live_gallery = _gallery_payload(layer_dir)
                 _webui_log("error", f"Inference failed for {input_path}.\n{err_tail}")
                 _job_payload(run_id, status="failed", save_dir=save_dir, layer_dir=layer_dir, error=err_tail)
                 self._set_state(
@@ -628,6 +654,7 @@ class HallwayWebApp:
                     error=_summarize_process_error(err_tail),
                     status_text=f"Inference failed.\n{_summarize_process_error(err_tail)}",
                     output_dir=str(save_dir),
+                    gallery=live_gallery,
                 )
                 return
 
@@ -1148,6 +1175,8 @@ APP_HTML = r"""
       let currentState = null;
       let pollTimer = null;
       let apiPromise = null;
+      let controlsDirty = false;
+      let controlsDirtyTimer = null;
 
       function getApi() {
         if (window.pywebview && window.pywebview.api) {
@@ -1211,15 +1240,24 @@ APP_HTML = r"""
           refs.previewImg.style.display = 'none';
           refs.preview.classList.add('empty');
         }
-        selectedMode = controls.quant_mode || selectedMode || 'auto';
-        updateModeButtons();
-        refs.deviceSelect.value = controls.device || 'auto';
-        refs.resolutionInput.value = String(controls.resolution || 1024);
-        refs.resolutionValue.textContent = String(controls.resolution || 1024);
-        refs.seedInput.value = String(controls.seed || 42);
-        refs.tblrSplit.checked = Boolean(controls.tblr_split);
+        if (!controlsDirty || currentState.is_running) {
+          selectedMode = controls.quant_mode || selectedMode || 'auto';
+          updateModeButtons();
+          refs.deviceSelect.value = controls.device || 'auto';
+          refs.resolutionInput.value = String(controls.resolution || 1024);
+          refs.resolutionValue.textContent = String(controls.resolution || 1024);
+          refs.seedInput.value = String(controls.seed || 42);
+          refs.tblrSplit.checked = Boolean(controls.tblr_split);
+        }
         refs.runBtn.disabled = Boolean(currentState.is_running);
         refs.runBtn.textContent = currentState.is_running ? 'Decomposing…' : 'Decompose';
+        if (currentState.is_running) {
+          controlsDirty = false;
+          if (controlsDirtyTimer) {
+            window.clearTimeout(controlsDirtyTimer);
+            controlsDirtyTimer = null;
+          }
+        }
         renderGallery(currentState.gallery || []);
       }
 
@@ -1287,6 +1325,32 @@ APP_HTML = r"""
         }
       }
 
+      function markControlsDirty() {
+        controlsDirty = true;
+        if (controlsDirtyTimer) {
+          window.clearTimeout(controlsDirtyTimer);
+        }
+        controlsDirtyTimer = window.setTimeout(() => {
+          controlsDirty = false;
+          controlsDirtyTimer = null;
+        }, 1200);
+      }
+
+      async function syncControls() {
+        markControlsDirty();
+        try {
+          await callApi('set_controls', {
+            quant_mode: selectedMode,
+            device: refs.deviceSelect.value,
+            resolution: Number(refs.resolutionInput.value || 1024),
+            seed: Number(refs.seedInput.value || 42),
+            tblr_split: refs.tblrSplit.checked,
+          });
+        } catch (error) {
+          console.error('ui-sync-controls-failed', error && (error.message || error));
+        }
+      }
+
       refs.dropzone.addEventListener('click', (event) => {
         if (event.target === refs.browserInput) {
           return;
@@ -1319,11 +1383,16 @@ APP_HTML = r"""
       refs.openFolderBtn.addEventListener('click', openOutputFolder);
       refs.resolutionInput.addEventListener('input', () => {
         refs.resolutionValue.textContent = refs.resolutionInput.value;
+        syncControls();
       });
+      refs.deviceSelect.addEventListener('change', syncControls);
+      refs.seedInput.addEventListener('input', syncControls);
+      refs.tblrSplit.addEventListener('change', syncControls);
       refs.modeButtons.forEach((button) => {
         button.addEventListener('click', () => {
           selectedMode = button.dataset.mode || 'auto';
           updateModeButtons();
+          syncControls();
         });
       });
       ['dragenter', 'dragover'].forEach((eventName) => {

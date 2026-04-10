@@ -151,6 +151,7 @@ def build_layerdiff_pipeline(args):
     quant_mode = args.quant_mode
     dtype = args.runtime_dtype
     use_cuda = str(args.runtime_device).startswith('cuda')
+    use_mps = str(args.runtime_device) == 'mps'
 
     if quant_mode == 'none':
         # bf16 baseline: load from original repo
@@ -167,8 +168,13 @@ def build_layerdiff_pipeline(args):
             move_module(pipeline.text_encoder_2, dtype=dtype, label='layerdiff.text_encoder_2')
             pipeline.enable_model_cpu_offload()
         else:
-            move_module(pipeline.vae, device=args.runtime_device, dtype=dtype, label='layerdiff.vae')
-            move_module(pipeline.trans_vae, device=args.runtime_device, dtype=dtype, label='layerdiff.trans_vae')
+            if use_mps:
+                print('  [Apple Metal] Keeping LayerDiff VAE/TransparentVAE on CPU due to unsupported MPS conv ops in vae_encode/decode.')
+                move_module(pipeline.vae, device='cpu', dtype=torch.float32, label='layerdiff.vae')
+                move_module(pipeline.trans_vae, device='cpu', dtype=torch.float32, label='layerdiff.trans_vae')
+            else:
+                move_module(pipeline.vae, device=args.runtime_device, dtype=dtype, label='layerdiff.vae')
+                move_module(pipeline.trans_vae, device=args.runtime_device, dtype=dtype, label='layerdiff.trans_vae')
             move_module(pipeline.unet, device=args.runtime_device, dtype=dtype, label='layerdiff.unet')
             move_module(pipeline.text_encoder, device=args.runtime_device, dtype=dtype, label='layerdiff.text_encoder')
             move_module(pipeline.text_encoder_2, device=args.runtime_device, dtype=dtype, label='layerdiff.text_encoder_2')
@@ -191,8 +197,13 @@ def build_layerdiff_pipeline(args):
             move_module(pipeline.trans_vae, dtype=dtype, label='layerdiff.trans_vae')
             pipeline.enable_model_cpu_offload()
         else:
-            move_module(pipeline.vae, device=args.runtime_device, dtype=dtype, label='layerdiff.vae')
-            move_module(pipeline.trans_vae, device=args.runtime_device, dtype=dtype, label='layerdiff.trans_vae')
+            if use_mps:
+                print('  [Apple Metal] Keeping LayerDiff VAE/TransparentVAE on CPU due to unsupported MPS conv ops in vae_encode/decode.')
+                move_module(pipeline.vae, device='cpu', dtype=torch.float32, label='layerdiff.vae')
+                move_module(pipeline.trans_vae, device='cpu', dtype=torch.float32, label='layerdiff.trans_vae')
+            else:
+                move_module(pipeline.vae, device=args.runtime_device, dtype=dtype, label='layerdiff.vae')
+                move_module(pipeline.trans_vae, device=args.runtime_device, dtype=dtype, label='layerdiff.trans_vae')
             # Don't manually .to(cuda) quantized components -- bnb handles device placement
             if getattr(args, 'group_offload', False) and use_cuda:
                 pipeline.enable_group_offload(args.runtime_device, num_blocks_per_group=1)
@@ -214,6 +225,14 @@ def build_layerdiff_pipeline(args):
                 delattr(pipeline, enc_name)
         maybe_empty_cache(args.runtime_device)
 
+    if use_mps:
+        if hasattr(pipeline, 'enable_attention_slicing'):
+            print('  [Apple Metal] Enabling attention slicing for LayerDiff.')
+            pipeline.enable_attention_slicing('max')
+        if hasattr(pipeline, 'enable_vae_slicing'):
+            print('  [Apple Metal] Enabling VAE slicing for LayerDiff.')
+            pipeline.enable_vae_slicing()
+
     return pipeline
 
 
@@ -222,6 +241,7 @@ def build_marigold_pipeline(args):
     quant_mode = args.quant_mode
     dtype = args.runtime_dtype
     use_cuda = str(args.runtime_device).startswith('cuda')
+    use_mps = str(args.runtime_device) == 'mps'
 
     if quant_mode == 'none':
         repo = args.repo_id_depth
@@ -231,7 +251,11 @@ def build_marigold_pipeline(args):
             move_module(marigold_pipe, dtype=dtype, label='marigold.pipeline')
             marigold_pipe.enable_model_cpu_offload()
         else:
-            move_module(marigold_pipe, device=args.runtime_device, dtype=dtype, label='marigold.pipeline')
+            if use_mps:
+                print('  [Apple Metal] Running Marigold depth on CPU for compatibility with unsupported MPS kernels.')
+                move_module(marigold_pipe, device='cpu', dtype=torch.float32, label='marigold.pipeline')
+            else:
+                move_module(marigold_pipe, device=args.runtime_device, dtype=dtype, label='marigold.pipeline')
             if getattr(args, 'group_offload', False) and use_cuda:
                 marigold_pipe.enable_group_offload(args.runtime_device, num_blocks_per_group=1)
         marigold_pipe.cache_tag_embeds()
@@ -241,12 +265,22 @@ def build_marigold_pipeline(args):
         unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet', torch_dtype=dtype)
 
         marigold_pipe = MarigoldDepthPipeline.from_pretrained(repo, unet=unet, torch_dtype=dtype)
-        move_module(marigold_pipe.vae, device=args.runtime_device, label='marigold.vae')
-        move_module(marigold_pipe.unet, device=args.runtime_device, label='marigold.unet')
-        move_module(marigold_pipe.text_encoder, device=args.runtime_device, label='marigold.text_encoder')
+        if use_mps:
+            print('  [Apple Metal] Running Marigold depth on CPU for compatibility with unsupported MPS kernels.')
+            move_module(marigold_pipe.vae, device='cpu', dtype=torch.float32, label='marigold.vae')
+            move_module(marigold_pipe.unet, device='cpu', dtype=torch.float32, label='marigold.unet')
+            move_module(marigold_pipe.text_encoder, device='cpu', dtype=torch.float32, label='marigold.text_encoder')
+        else:
+            move_module(marigold_pipe.vae, device=args.runtime_device, label='marigold.vae')
+            move_module(marigold_pipe.unet, device=args.runtime_device, label='marigold.unet')
+            move_module(marigold_pipe.text_encoder, device=args.runtime_device, label='marigold.text_encoder')
         if getattr(args, 'group_offload', False) and use_cuda:
             marigold_pipe.enable_group_offload(args.runtime_device, num_blocks_per_group=1)
         marigold_pipe.cache_tag_embeds()
+
+    if use_mps and hasattr(marigold_pipe, 'enable_attention_slicing'):
+        print('  [Apple Metal] Enabling attention slicing for Marigold.')
+        marigold_pipe.enable_attention_slicing('max')
 
     return marigold_pipe
 
