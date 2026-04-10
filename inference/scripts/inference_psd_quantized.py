@@ -146,6 +146,28 @@ def maybe_reset_peak_memory(device: str) -> None:
         torch.cuda.reset_peak_memory_stats()
 
 
+def log_runtime_backend(args) -> None:
+    torch_origin = getattr(torch, "__file__", "unknown")
+    print(f"  Torch origin: {torch_origin}")
+    print(f"  Torch version: {getattr(torch, '__version__', 'unknown')}")
+    if str(args.runtime_device).startswith('cuda'):
+        if torch.cuda.is_available():
+            try:
+                device_index = torch.cuda.current_device()
+                device_name = torch.cuda.get_device_name(device_index)
+            except Exception:
+                device_name = "unknown CUDA device"
+            print(f"  CUDA device: {device_name}")
+        else:
+            print("  WARNING: CUDA was requested but torch.cuda.is_available() is False.")
+    elif str(args.runtime_device) == 'mps':
+        backends = getattr(torch, 'backends', None)
+        mps_backend = getattr(backends, 'mps', None)
+        is_built = getattr(mps_backend, 'is_built', lambda: False) if mps_backend is not None else (lambda: False)
+        is_available = getattr(mps_backend, 'is_available', lambda: False) if mps_backend is not None else (lambda: False)
+        print(f"  MPS built={bool(is_built())}, available={bool(is_available())}")
+
+
 def build_layerdiff_pipeline(args):
     """Build the LayerDiff3D pipeline with appropriate quantization."""
     quant_mode = args.quant_mode
@@ -332,16 +354,18 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
     def _crop_head(img, xywh):
         x, y, w, h = xywh
         ih, iw = img.shape[:2]
-
-        # Asymmetric padding: wider upward to capture headwear (hats, horns, etc.)
-        pad_x = int(w * 0.30)
-        pad_y_up = int(h * 0.60)
-        pad_y_down = int(h * 0.30)
-
-        x1 = max(x - min(pad_x, x), 0)
-        x2 = min(x + w + min(pad_x, iw - (x + w)), iw)
-        y1 = max(y - min(pad_y_up, y), 0)
-        y2 = min(y + h + min(pad_y_down, ih - (y + h)), ih)
+        x1 = x
+        y1 = y
+        x2 = x + w
+        y2 = y + h
+        if w < iw // 2:
+            px = min(iw - x - w, x, w // 5)
+            x1 = min(max(x - px, 0), iw)
+            x2 = min(max(x + w + px, 0), iw)
+        if h < ih // 2:
+            py = min(ih - y - h, y, h // 5)
+            y2 = min(max(y + h + py, 0), ih)
+            y1 = min(max(y - py, 0), ih)
         return img[y1: y2, x1: x2], (x1, y1, x2, y2)
 
     input_head, (hx1, hy1, hx2, hy2) = _crop_head(input_img, [hx, hy, hw, hh])
@@ -520,8 +544,8 @@ if __name__ == '__main__':
     parser.add_argument('--no_cpu_offload', action='store_false', dest='cpu_offload',
                         help='disable model CPU offload')
     parser.add_argument('--num_inference_steps', type=int, default=30)
-    parser.add_argument('--resolution_depth', type=int, default=720,
-                        help='Marigold depth inference resolution (default 720; -1 to match layerdiff resolution)')
+    parser.add_argument('--resolution_depth', type=int, default=768,
+                        help='Marigold depth inference resolution (default 768; -1 to match layerdiff resolution)')
     parser.add_argument('--group_offload', action='store_true', default=True,
                         help='Enable group offload to reduce peak VRAM (default: on)')
     parser.add_argument('--no_group_offload', action='store_false', dest='group_offload',
@@ -563,6 +587,7 @@ if __name__ == '__main__':
 
     print(f"Quantized inference: quant_mode={args.quant_mode}, cpu_offload={args.cpu_offload}")
     print(f"  Runtime device: {args.runtime_device}, dtype: {args.runtime_dtype}")
+    log_runtime_backend(args)
     print(f"  Source image: {srcp}")
     print(f"  Save dir: {save_dir}")
     print(f"  Resolution: {resolution}, Steps: {num_inference_steps}, Seed: {seed}")

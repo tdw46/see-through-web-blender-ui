@@ -5,6 +5,7 @@ Shared helpers for Hallway Avatar Gen.
 from __future__ import annotations
 
 import os
+import platform
 import site
 import subprocess
 import sys
@@ -265,6 +266,61 @@ def _probe_module_from_path(path: Path, module_name: str) -> tuple[bool, str]:
     return result
 
 
+def _probe_torch_backend_from_path(path: Path) -> tuple[bool, str]:
+    cache_key = (str(path), "__torch_backend__")
+    cached = _PROBE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    code = (
+        "import json, sys; "
+        f"sys.path.insert(0, {str(path)!r}); "
+        "payload = {'ok': False, 'detail': ''}; "
+        "try:\n"
+        " import torch\n"
+        " backend = 'cpu'\n"
+        " if torch.cuda.is_available():\n"
+        "  backend = 'cuda'\n"
+        " else:\n"
+        "  backends = getattr(torch, 'backends', None)\n"
+        "  mps_backend = getattr(backends, 'mps', None)\n"
+        "  if mps_backend is not None:\n"
+        "   is_built = getattr(mps_backend, 'is_built', lambda: True)\n"
+        "   is_available = getattr(mps_backend, 'is_available', lambda: False)\n"
+        "   if bool(is_built()) and bool(is_available()):\n"
+        "    backend = 'mps'\n"
+        " payload['ok'] = True\n"
+        " payload['detail'] = backend\n"
+        "except Exception as exc:\n"
+        " payload['detail'] = f'{exc.__class__.__name__}: {exc}'\n"
+        "print(json.dumps(payload))"
+    )
+    try:
+        proc = subprocess.run(
+            [blender_python_executable(), "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception as exc:
+        result = (False, f"{exc.__class__.__name__}: {exc}")
+        _PROBE_CACHE[cache_key] = result
+        return result
+
+    stdout = proc.stdout.strip().splitlines()
+    payload_line = stdout[-1] if stdout else ""
+    try:
+        payload = json.loads(payload_line)
+    except Exception:
+        result = (False, payload_line or proc.stderr.strip() or f"exit {proc.returncode}")
+        _PROBE_CACHE[cache_key] = result
+        return result
+
+    result = (bool(payload.get("ok")), str(payload.get("detail", "")))
+    _PROBE_CACHE[cache_key] = result
+    return result
+
+
 def _sibling_extension_dirs() -> list[Path]:
     directories: list[Path] = []
     source_parent = package_root().parent
@@ -292,16 +348,26 @@ def _candidate_import_score(path: Path) -> tuple[int, int, str]:
     marker_count = 0
     ok_count = 0
     failures: list[str] = []
+    backend_score = 0
     for module_name in PROBE_MODULES:
         if (path / module_name).exists() or any(path.glob(f"{module_name}*.dist-info")):
             marker_count += 1
             ok, detail = _probe_module_from_path(path, module_name)
             if ok:
                 ok_count += 1
+                if module_name == "torch":
+                    torch_ok, backend = _probe_torch_backend_from_path(path)
+                    if torch_ok:
+                        system_name = platform.system()
+                        preferred = "mps" if system_name == "Darwin" else "cuda"
+                        if backend == preferred:
+                            backend_score -= 25
+                        elif backend == "cpu":
+                            backend_score += 25
             else:
                 failures.append(f"{module_name}:{detail}")
     penalty = 0 if not failures else 100 - ok_count
-    return (penalty, -ok_count, str(path))
+    return (penalty + backend_score, -ok_count, str(path))
 
 
 def shared_dependency_paths(*, force_refresh: bool = False) -> list[Path]:
