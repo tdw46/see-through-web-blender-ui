@@ -1,51 +1,13 @@
-# ── Credentials & secrets ─────────────────────────────────────────
-hf_credential
-*.token
-.env
-.env.*
-!*.example
-
-# ── Workspace (datasets, model weights) ──────────────────────────
-workspace/
-
-# ── Python ────────────────────────────────────────────────────────
+# Python cache directories
 __pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-*.egg
-build/
-dist/
+**/__pycache__/
 
-# ── IDE & editors ─────────────────────────────────────────────────
-.vscode/
-.idea/
-*.code-workspace
+# AutoRig Pro local preset folders
+C:/Users/tyler/Documents/AutoRigPro/Remap Presets/
+C:/Users/tyler/Documents/AutoRigPro/Armatures Presets/
 
-# ── OS artifacts ──────────────────────────────────────────────────
-.DS_Store
-Thumbs.db
-*~
-
-# ── Misc artifacts ────────────────────────────────────────────────
-tmp/
-*.log
-wandb/
-local_*
-
-# ── Symlink (user creates locally: ln -sf common/assets assets) ──
-/assets
-
-# ── WebUI installer artifacts ─────────────────────────────────────
-venv/
-.pip_cache/
-.hf_cache/
-*.zip
-wheels/cache/
-_vendor/
-logs/
-
-# ── Non-WebUI local files ─────────────────────────────────────────
-seethrough_colab_codex.ipynb
-requirements-colab-t4-nf4.txt
-seethrough_webui.bat
+# Bundled and extracted extension-local dependencies
+vendor/*
+!vendor/README.md
+wheels/*
+!wheels/README.md

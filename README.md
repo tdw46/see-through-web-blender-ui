@@ -1,162 +1,24 @@
-<div align="center">
+# Hallway Avatar Gen
 
-# See-through WebUI
+Blender extension scaffold for importing See-through-style layered PSD files into Blender. The long-term goal is 2.5-D avatar generation from See-through inputs, but this first release is focused on importing and organizing those layers cleanly.
 
-**アニメイラスト1枚 → 最大23レイヤーに自動分解**
+## Current scope
 
-[![Original Project](https://img.shields.io/badge/Original-shitagaki--lab%2Fsee--through-blue)](https://github.com/shitagaki-lab/see-through)
-[![arXiv](https://img.shields.io/badge/arXiv-2602.03749-b31b1b.svg)](https://arxiv.org/abs/2602.03749)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+- PSD import via extension-local `psd_tools` and `Pillow` dependencies
+- Recursive PSD layer traversal with hidden/empty-layer skipping
+- Cached PNG export per visible raster layer
+- Heuristic See-through-aware name classification
+- Layer-aligned Blender mesh creation for imported visible parts
 
-<img src="common/assets/representative.jpg" width="600">
+## Current limitations
 
-*[See-through](https://github.com/shitagaki-lab/see-through) のローカル実行用 WebUI です。*
-*Windows + NVIDIA GPU 専用。Python やコマンドラインの知識は不要 — ダブルクリックだけで使えます。*
+- The add-on is currently positioned as a See-through layer importer, not a finished 2.5-D avatar generator yet
+- 2.5-D generation, rigging, Gemini integration, and See-through image parsing are planned follow-up work
+- The alpha mesh stage currently uses an internal fallback grid mesh over the visible alpha bounds instead of the full `Import Meshed Alpha` tracing pipeline
 
-<img src="docs/img.png" width="800">
+## Usage
 
-</div>
-
----
-
-## 🚀 使い方（たったの3ステップ）
-
-### ステップ 0：ダウンロード
-
-👉 **[最新版をダウンロード（ZIP）](https://github.com/BeamManP/see-through-webui/releases/latest)**
-
-Releases ページから `see-through-webui.zip` をダウンロードし、好きな場所に展開してください。
-
-### ステップ 1：インストール
-
-展開したフォルダ内の **`install.bat`** をダブルクリックしてください。
-
-あとは待つだけ。以下が全部自動で行われます：
-- ✅ Python がなければ自動でインストール
-- ✅ AI モデル（約3GB）を自動でダウンロード
-- ✅ 必要なソフトを全部セットアップ
-
-> 💡 初回は **15〜30分** かかります（ネット回線によります）。
-> 初回ダウンロード総量は約 **6GB**（Python + PyTorch + AI モデル）です。
-> 途中で止まっても、もう一度 `install.bat` を実行すれば続きからやり直せます。
-
-### ステップ 2：起動
-
-**`run.bat`** をダブルクリックしてください。
-
-ブラウザが自動で開きます。画像をドラッグ＆ドロップして「生成」を押すだけ！
-
----
-
-## 💻 必要なもの
-
-| 必要なもの | 条件 |
-|-----------|------|
-| **OS** | Windows 10 / 11（64ビット） |
-| **GPU** | NVIDIA RTX 2060 以上（Turing世代以降） |
-| **VRAM** | 8GB 以上 |
-| **メモリ** | 8GB 以上 |
-| **空き容量** | 20GB 以上 |
-| **Python** | なくてOK（自動インストールされます） |
-| **Git** | なくてOK（Releasesからzipをダウンロードしてください） |
-
-> ⚠️ **GTX 10xx / 16xx シリーズでは動作しません。**
-> NF4 量子化に必要な機能が Turing 世代（RTX 20xx）以降の GPU にしかないためです。
-
-### VRAM と解像度の目安
-
-解像度を上げると高品質になりますが、VRAMを多く使います。
-WebUI のスライダーで調整できます。
-
-| 解像度 | VRAM 使用量 | おすすめ環境 |
-|--------|-----------|------------|
-| 512    | 約 5GB    | RTX 2060 / RTX 3060 |
-| 768    | 約 5.5GB  | RTX 3060 / RTX 4060 |
-| 1024   | 約 7GB    | RTX 3060 Ti / RTX 4060 Ti |
-| 1280   | 約 9GB    | RTX 3080 / RTX 4070 以上 |
-
----
-
-## ❓ 困ったときは
-
-<details>
-<summary><b>ダウンロードや実行時に Windows の警告が出た</b></summary>
-
-ブラウザから ZIP をダウンロードすると、Windows Defender SmartScreen が警告を出すことがあります。
-これは未署名の配布物に対する一般的な警告で、ウイルスではありません。
-
-- Chrome: 「保存」→「詳細」→「保持する」
-- Edge: 「...」→「保持する」
-- 実行時: 「詳細情報」→「実行」
-</details>
-
-<details>
-<summary><b>install.bat でエラーが出た</b></summary>
-
-- もう一度 `install.bat` をダブルクリックしてみてください（途中から再開できます）
-- うまくいかない場合は、`venv` フォルダを丸ごと削除してからやり直してください
-- エラーの詳細は `install.log` に記録されています
-</details>
-
-<details>
-<summary><b>「NVIDIA GPU not detected」と表示される</b></summary>
-
-このツールは **NVIDIA GPU 専用** です（AMD / Intel GPU では動きません）。
-NVIDIA GPU があるのにエラーが出る場合は、ドライバを最新版に更新してください。
-→ https://www.nvidia.com/drivers
-</details>
-
-<details>
-<summary><b>生成中に「Out of Memory」と出る</b></summary>
-
-VRAM が足りません。WebUI の解像度スライダーを **512 〜 768** に下げてみてください。
-</details>
-
-<details>
-<summary><b>「Error named symbol not found」と表示される</b></summary>
-
-GTX 10xx / 16xx シリーズの GPU では動作しません。
-NF4 量子化（VRAM節約のための技術）が RTX 20xx 以降の GPU を必要とするためです。
-</details>
-
-<details>
-<summary><b>ブラウザが自動で開かない</b></summary>
-
-`run.bat` の画面に表示される URL（`http://127.0.0.1:7860` など）を
-ブラウザのアドレスバーにコピペしてください。
-</details>
-
----
-
-## 📁 ファイル構成
-
-```
-see-through-webui/
-├── 📄 install.bat          … インストーラー（初回のみ）
-├── 📄 run.bat              … 起動ランチャー（毎回これを使う）
-├── 📁 tools/
-│   └── webui.py            … WebUI 本体
-├── 📁 webui/
-│   └── requirements.txt    … 依存パッケージ一覧
-├── 📁 inference/           … See-through 推論エンジン（本家由来）
-├── 📁 common/              … 共通ユーティリティ（本家由来）
-├── 📁 venv/                … Python 仮想環境（install.bat で作成）
-└── 📁 .hf_cache/           … AI モデルのキャッシュ
-```
-
----
-
-## 🙏 クレジット
-
-このプロジェクトは **[See-through](https://github.com/shitagaki-lab/see-through)** のフォークです。
-
-**原著論文:**
-> Jian Lin, Chengze Li, Haoyun Qin, Kwun Wang Chan, Yanghua Jin, Hanyuan Liu, Stephen Chun Wang Choy, Xueting Liu.
-> "See-through: Single-image Layer Decomposition for Anime Characters"
-> *ACM SIGGRAPH 2026 Conference Proceedings* — [arXiv:2602.03749](https://arxiv.org/abs/2602.03749)
-
-元プロジェクトの作者の皆さまに心から感謝します。
-
-## 📄 ライセンス
-
-[Apache License 2.0](LICENSE) — 原著プロジェクトと同一のライセンスです。
+1. Add local `psd_tools` and `Pillow` wheels to [wheels/README.md](/Users/tylerwalker/Library/Application%20Support/Blender/5.0/extensions/user_default/hallway_avatar_gen/wheels/README.md) or extracted packages to [vendor/README.md](/Users/tylerwalker/Library/Application%20Support/Blender/5.0/extensions/user_default/hallway_avatar_gen/vendor/README.md).
+2. Open the add-on preferences or the `Hallway` sidebar panel and run `Install PSD Backend`.
+3. Import a PSD with `Import PSD Avatar`.
+4. Review the imported layers and skipped-layer summary in Blender.
