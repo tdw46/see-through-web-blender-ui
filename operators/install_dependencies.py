@@ -9,7 +9,7 @@ from ..utils import env
 class HALLWAYAVATAR_OT_install_psd_backend(Operator):
     bl_idname = "hallway_avatar.install_psd_backend"
     bl_label = "Install PSD Backend"
-    bl_description = "Install bundled psd-tools and Pillow wheels into the extension-local vendor directory"
+    bl_description = "Install bundled psd-tools, Pillow, and silhouette tracing wheels into the extension-local vendor directory"
 
     def execute(self, context: bpy.types.Context):
         try:

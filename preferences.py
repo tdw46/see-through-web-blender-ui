@@ -54,7 +54,7 @@ class HALLWAYAVATAR_Preferences(AddonPreferences):
 
         install_box = layout.box()
         install_box.label(text="PSD Backend")
-        install_box.label(text="Only PSD import dependencies are supported right now.")
+        install_box.label(text="Installs PSD parsing plus silhouette tracing dependencies.")
         install_box.label(text="See-through generation dependencies are not required yet.")
         install_box.label(text="Use bundled wheels or vendored packages inside this extension folder.")
         install_box.operator("hallway_avatar.install_psd_backend", icon="IMPORT")

@@ -35,7 +35,7 @@ class HALLWAYAVATAR_PT_main(Panel):
         backend_box = layout.box()
         backend_box.label(text=f"PSD Backend: {backend_status}")
         if backend_status != "ready":
-            backend_box.label(text="Place local wheels or vendored packages in the extension folder.")
+            backend_box.label(text="Place local parser and silhouette tracing wheels in the extension folder.")
             backend_box.operator("hallway_avatar.install_psd_backend", icon="IMPORT")
 
         options = layout.box()

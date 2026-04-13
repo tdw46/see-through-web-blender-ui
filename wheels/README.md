@@ -6,6 +6,7 @@ Current supported optional dependency set:
 
 - `psd_tools`
 - `Pillow`
+- `vtracer`
 
 After adding compatible wheel files for Blender's bundled Python version and your platform, run the add-on's `Install PSD Backend` action. The add-on will extract those wheels into `vendor/site-packages/`.
 

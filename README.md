@@ -4,7 +4,7 @@ Blender extension scaffold for importing See-through-style layered PSD files int
 
 ## Current scope
 
-- PSD import via extension-local `psd_tools` and `Pillow` dependencies
+- PSD import via extension-local `psd_tools`, `Pillow`, and `vtracer` dependencies
 - Recursive PSD layer traversal with hidden/empty-layer skipping
 - Cached PNG export per visible raster layer
 - Heuristic See-through-aware name classification

@@ -4,6 +4,7 @@ import importlib
 import sys
 import zipfile
 import importlib.util
+import importlib.machinery
 from pathlib import Path
 from shutil import rmtree
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 from . import paths
 
 PSD_REQUIRED_MODULES = ("psd_tools", "PIL")
+TRACE_REQUIRED_MODULES = ("vtracer",)
 
 
 def bootstrap(configured_cache_dir: str = "") -> str:
@@ -35,9 +37,19 @@ def _find_local_module_entry(module_name: str) -> Path | None:
         if init_file.exists():
             return init_file
 
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+            ext_file = package_dir / f"{module_name}{suffix}"
+            if ext_file.exists():
+                return ext_file
+
         module_file = root / f"{module_name}.py"
         if module_file.exists():
             return module_file
+
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+            ext_file = root / f"{module_name}{suffix}"
+            if ext_file.exists():
+                return ext_file
     return None
 
 
@@ -65,14 +77,25 @@ def _load_local_module(module_name: str):
     return module
 
 
+def _preload_local_dependencies(module_name: str) -> None:
+    dependency_map = {
+        "psd_tools": ("typing_extensions", "attr", "attrs", "numpy", "PIL"),
+        "vtracer": (),
+    }
+    for dependency in dependency_map.get(module_name, ()):
+        try:
+            importlib.import_module(dependency)
+        except Exception:
+            _load_local_module(dependency)
+
+
 def can_import(module_name: str, configured_cache_dir: str = "") -> bool:
     try:
         importlib.import_module(module_name)
         return True
     except Exception:
         try:
-            if module_name == "psd_tools":
-                _load_local_module("PIL")
+            _preload_local_dependencies(module_name)
             _load_local_module(module_name)
             return True
         except Exception:
@@ -83,8 +106,7 @@ def import_optional(module_name: str, configured_cache_dir: str = "") -> Any:
     try:
         return importlib.import_module(module_name)
     except Exception:
-        if module_name == "psd_tools":
-            _load_local_module("PIL")
+        _preload_local_dependencies(module_name)
         return _load_local_module(module_name)
 
 
@@ -110,9 +132,13 @@ def psd_backend_assets() -> dict[str, object]:
     vendored = all(
         (install_root / module).exists() or (vendor_root / module).exists()
         for module in PSD_REQUIRED_MODULES
+    ) and all(
+        (install_root / module).exists() or (vendor_root / module).exists()
+        for module in TRACE_REQUIRED_MODULES
     )
     psd_wheels = _matching_wheels(("psd_tools",))
     pillow_wheels = _matching_wheels(("pillow",))
+    vtracer_wheels = _matching_wheels(("vtracer",))
     return {
         "install_root": install_root,
         "vendor_root": vendor_root,
@@ -121,6 +147,7 @@ def psd_backend_assets() -> dict[str, object]:
         "vendored": vendored,
         "psd_wheels": psd_wheels,
         "pillow_wheels": pillow_wheels,
+        "vtracer_wheels": vtracer_wheels,
     }
 
 
@@ -131,35 +158,26 @@ def install_bundled_psd_backend() -> str:
     all_wheels = assets["all_wheels"]
     psd_wheels = assets["psd_wheels"]
     pillow_wheels = assets["pillow_wheels"]
+    vtracer_wheels = assets["vtracer_wheels"]
 
     if assets["vendored"]:
         if all((vendor_root / module).exists() for module in PSD_REQUIRED_MODULES):
             return f"PSD backend already available from {vendor_root}"
         return f"PSD backend already available from {install_root}"
 
-    if not psd_wheels or not pillow_wheels:
+    if not psd_wheels or not pillow_wheels or not vtracer_wheels:
         raise RuntimeError(
-            "Missing bundled PSD dependency wheels. Add compatible `psd_tools` and `Pillow` wheels under "
+            "Missing bundled import dependency wheels. Add compatible `psd_tools`, `Pillow`, and `vtracer` wheels under "
             f"{assets['wheels_root']} or vendor extracted packages under {assets['vendor_root']}."
         )
 
     install_root.mkdir(parents=True, exist_ok=True)
 
-    cleanup_prefixes = (
-        "psd_tools",
-        "psd_tools-",
-        "pillow",
-        "pillow-",
-        "pil",
-        "PIL",
-    )
-    for child in install_root.iterdir():
-        child_name = child.name.lower().replace("-", "_")
-        if any(child_name.startswith(prefix.lower().replace("-", "_")) for prefix in cleanup_prefixes):
-            if child.is_dir():
-                rmtree(child)
-            else:
-                child.unlink()
+    for child in list(install_root.iterdir()):
+        if child.is_dir():
+            rmtree(child)
+        else:
+            child.unlink()
 
     for wheel in all_wheels:
         with zipfile.ZipFile(wheel) as archive:
@@ -173,21 +191,21 @@ def install_bundled_psd_backend() -> str:
 
 
 def ensure_psd_backend(configured_cache_dir: str = "") -> None:
-    if not can_import("psd_tools", configured_cache_dir):
+    if not can_import("psd_tools", configured_cache_dir) or not can_import("vtracer", configured_cache_dir):
         assets = psd_backend_assets()
         raise RuntimeError(
-            "PSD backend is not available. Put extracted `psd_tools`/`PIL` packages under "
-            f"{assets['vendor_root']} or compatible `psd_tools` and `Pillow` wheels under {assets['wheels_root']}, "
+            "PSD import backend is not available. Put extracted `psd_tools`/`PIL`/`vtracer` packages under "
+            f"{assets['vendor_root']} or compatible `psd_tools`, `Pillow`, and `vtracer` wheels under {assets['wheels_root']}, "
             "then use the bundled PSD install action in the add-on preferences."
         )
 
 
 def psd_backend_status(configured_cache_dir: str = "") -> str:
-    if can_import("psd_tools", configured_cache_dir):
+    if can_import("psd_tools", configured_cache_dir) and can_import("vtracer", configured_cache_dir):
         return "ready"
     assets = psd_backend_assets()
     if assets["vendored"]:
         return "vendored-but-unloaded"
-    if assets["psd_wheels"] and assets["pillow_wheels"]:
+    if assets["psd_wheels"] and assets["pillow_wheels"] and assets["vtracer_wheels"]:
         return "bundled wheels available"
     return "missing"

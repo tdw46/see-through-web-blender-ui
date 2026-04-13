@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 
 from ..utils import env, paths
 from ..utils.logging import get_logger
@@ -21,6 +22,10 @@ def _coerce_bbox(raw_bbox) -> tuple[int, int, int, int]:
 def _safe_filename(name: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in name.strip())
     return cleaned or "layer"
+
+
+def _is_valid_bbox(bbox: tuple[int, int, int, int]) -> bool:
+    return bbox[2] > bbox[0] and bbox[3] > bbox[1]
 
 
 def load_psd_layer_parts(
@@ -83,12 +88,30 @@ def load_psd_layer_parts(
                 parts.append(base_part)
                 continue
 
+            raster_start = perf_counter()
+            image = None
+            raster_errors: list[str] = []
             try:
-                image = layer.topil()
+                # Prefer bbox-aware compositing so PSD layers behave like standalone images
+                # before they enter the meshed-alpha import path.
+                image = layer.composite(viewport=bbox)
             except Exception as exc:
-                logger.warning("Failed to rasterize PSD layer %s: %s", layer_path, exc)
+                raster_errors.append(f"composite failed: {exc}")
+
+            if image is None:
+                try:
+                    image = layer.topil()
+                except Exception as exc:
+                    raster_errors.append(f"topil failed: {exc}")
+
+            if image is None:
+                logger.warning(
+                    "Failed to rasterize PSD layer %s: %s",
+                    layer_path,
+                    "; ".join(raster_errors) or "no raster data",
+                )
                 base_part.skipped = True
-                base_part.skip_reason = f"rasterization failed: {exc}"
+                base_part.skip_reason = "; ".join(raster_errors) or "rasterization failed"
                 parts.append(base_part)
                 continue
 
@@ -103,10 +126,12 @@ def load_psd_layer_parts(
             visible_pixels = int(stats["visible_pixels"])
             local_bbox = tuple(int(value) for value in stats["local_bbox"])
             centroid = tuple(float(value) for value in stats["centroid"])
+            alpha_max = int(stats.get("alpha_max", 0))
+            alpha_threshold = int(stats.get("alpha_threshold", 0))
 
-            if visible_pixels == 0 and ignore_empty_layers:
+            if visible_pixels == 0 or not _is_valid_bbox(local_bbox):
                 base_part.skipped = True
-                base_part.skip_reason = "fully transparent"
+                base_part.skip_reason = f"fully transparent or faint alpha noise (max alpha {alpha_max})"
                 parts.append(base_part)
                 continue
 
@@ -117,16 +142,34 @@ def load_psd_layer_parts(
                     parts.append(base_part)
                     continue
 
+            expected_layer_size = (width, height)
+            is_canvas_sized = image.size == (int(psd.width), int(psd.height))
+            cropped = image.crop(local_bbox)
             temp_path = session_dir / f"{draw_index:04d}_{_safe_filename(layer_name)}.png"
-            image.save(temp_path)
+            cropped.save(temp_path)
 
-            global_bbox = (
-                bbox[0] + local_bbox[0],
-                bbox[1] + local_bbox[1],
-                bbox[0] + local_bbox[2],
-                bbox[1] + local_bbox[3],
-            )
-            global_centroid = (bbox[0] + centroid[0], bbox[1] + centroid[1])
+            if image.size == expected_layer_size:
+                global_bbox = (
+                    bbox[0] + local_bbox[0],
+                    bbox[1] + local_bbox[1],
+                    bbox[0] + local_bbox[2],
+                    bbox[1] + local_bbox[3],
+                )
+                global_centroid = (bbox[0] + centroid[0], bbox[1] + centroid[1])
+            elif is_canvas_sized:
+                global_bbox = local_bbox
+                global_centroid = centroid
+            else:
+                global_bbox = (
+                    bbox[0] + local_bbox[0],
+                    bbox[1] + local_bbox[1],
+                    bbox[0] + local_bbox[2],
+                    bbox[1] + local_bbox[3],
+                )
+                global_centroid = (bbox[0] + centroid[0], bbox[1] + centroid[1])
+
+            cropped_bbox = (0, 0, cropped.size[0], cropped.size[1])
+            raster_seconds = perf_counter() - raster_start
 
             part = LayerPart(
                 source_path=source_path,
@@ -135,17 +178,28 @@ def load_psd_layer_parts(
                 layer_path=layer_path,
                 layer_name=layer_name,
                 temp_image_path=str(temp_path),
-                image_size=image.size,
+                image_size=cropped.size,
                 canvas_size=(int(psd.width), int(psd.height)),
-                canvas_offset=(bbox[0], bbox[1]),
+                canvas_offset=(global_bbox[0], global_bbox[1]),
                 alpha_bbox=global_bbox,
-                local_alpha_bbox=local_bbox,
+                local_alpha_bbox=cropped_bbox,
                 centroid=global_centroid,
                 area=visible_pixels,
                 perimeter=float(stats["perimeter"]),
                 draw_index=draw_index,
             )
             parts.append(part)
+            logger.info(
+                "Rasterized %s -> crop %sx%s from canvas %sx%s in %.3fs (alpha max %s, bbox threshold %s)",
+                layer_path,
+                cropped.size[0],
+                cropped.size[1],
+                psd.width,
+                psd.height,
+                raster_seconds,
+                alpha_max,
+                alpha_threshold,
+            )
 
     walk(psd)
     logger.info("Parsed PSD %s into %s layer parts", filepath, len(parts))

@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import importlib
+import bmesh
 import bpy
+from math import radians
+from mathutils import Vector
+from pathlib import Path
+from time import perf_counter
 
+from ..utils import env
 from ..utils.logging import get_logger
 from .models import LayerPart
 
@@ -18,48 +25,42 @@ def _pixel_to_plane(x: float, y: float, canvas_size: tuple[int, int]) -> tuple[f
     )
 
 
-def _uv_bounds(part: LayerPart) -> tuple[float, float, float, float]:
-    image_w = max(1, part.image_size[0])
-    image_h = max(1, part.image_size[1])
-    local = part.local_alpha_bbox
-    u0 = local[0] / image_w
-    u1 = local[2] / image_w
-    v_top = 1.0 - (local[1] / image_h)
-    v_bottom = 1.0 - (local[3] / image_h)
-    return (u0, u1, v_bottom, v_top)
-
-
-def _build_grid_geometry(
-    part: LayerPart,
-    resolution: int,
-) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int, int]], int, int]:
-    bbox = part.alpha_bbox if any(part.alpha_bbox) else (
-        part.canvas_offset[0],
-        part.canvas_offset[1],
-        part.canvas_offset[0] + part.image_size[0],
-        part.canvas_offset[1] + part.image_size[1],
+def _trace_pixels_to_bmesh(part: LayerPart, context: bpy.types.Context) -> bmesh.types.BMesh:
+    env.import_optional("vtracer")
+    mesher = importlib.import_module(f"{__package__}.import_meshed_alpha_vendor.alpha_mesher")
+    pixels = mesher.preprocess_image(
+        Path(part.temp_image_path),
+        False,
+        None,
+        False,
+        0,
+        False,
+        (0.1, 0.9),
+        1.0,
+        None,
     )
-    x0, y0, x1, y1 = bbox
-    width = max(1, x1 - x0)
-    height = max(1, y1 - y0)
-    x_steps = max(1, min(resolution, width))
-    y_steps = max(1, min(resolution, height))
+    svg_data = mesher.trace_image(pixels, "spline")
+    parsed = mesher.parse_trace(svg_data)
+    bm = mesher.parsed_to_bmesh(parsed, context)
+    mesher.post_process_mesh(
+        bm,
+        x_align="NONE",
+        y_align="NONE",
+        triangulate=False,
+        xy_divisions=(1, 1),
+        divide_ngons=False,
+        remove_small_islands=0,
+    )
+    return bm
 
-    verts: list[tuple[float, float, float]] = []
-    faces: list[tuple[int, int, int, int]] = []
 
-    for row in range(y_steps + 1):
-        y = y0 + (height * row / y_steps)
-        for col in range(x_steps + 1):
-            x = x0 + (width * col / x_steps)
-            verts.append(_pixel_to_plane(x, y, part.canvas_size))
-
-    for row in range(y_steps):
-        for col in range(x_steps):
-            base = row * (x_steps + 1) + col
-            faces.append((base, base + 1, base + x_steps + 2, base + x_steps + 1))
-
-    return verts, faces, x_steps, y_steps
+def _apply_canvas_transform(obj: bpy.types.Object, part: LayerPart) -> None:
+    scale = 2.0 / max(1.0, float(max(part.canvas_size)))
+    center_x = part.canvas_offset[0] + part.image_size[0] * 0.5
+    center_y = part.canvas_offset[1] + part.image_size[1] * 0.5
+    obj.location = Vector(_pixel_to_plane(center_x, center_y, part.canvas_size))
+    obj.rotation_euler = (radians(90.0), 0.0, 0.0)
+    obj.scale = (scale, scale, scale)
 
 
 def _ensure_image_material(part: LayerPart) -> bpy.types.Material:
@@ -101,27 +102,13 @@ def build_layer_mesh(
     *,
     grid_resolution: int = 12,
 ) -> bpy.types.Object:
-    verts, faces, x_steps, y_steps = _build_grid_geometry(part, grid_resolution)
     mesh = bpy.data.meshes.new(f"{part.layer_name}_mesh")
-    mesh.from_pydata(verts, [], faces)
+    trace_start = perf_counter()
+    bm = _trace_pixels_to_bmesh(part, context)
+    bm.to_mesh(mesh)
+    bm.free()
     mesh.update()
-
-    uv_layer = mesh.uv_layers.new(name="UVMap")
-    u0, u1, v0, v1 = _uv_bounds(part)
-    face_index = 0
-    for row in range(y_steps):
-        for col in range(x_steps):
-            if face_index >= len(mesh.polygons):
-                break
-            face = mesh.polygons[face_index]
-            u_left = u0 + (u1 - u0) * (col / x_steps)
-            u_right = u0 + (u1 - u0) * ((col + 1) / x_steps)
-            v_top = v1 - (v1 - v0) * (row / y_steps)
-            v_bottom = v1 - (v1 - v0) * ((row + 1) / y_steps)
-            coords = ((u_left, v_top), (u_right, v_top), (u_right, v_bottom), (u_left, v_bottom))
-            for loop_offset, loop_index in enumerate(face.loop_indices):
-                uv_layer.data[loop_index].uv = coords[loop_offset]
-            face_index += 1
+    trace_seconds = perf_counter() - trace_start
 
     material = _ensure_image_material(part)
     if mesh.materials:
@@ -132,10 +119,18 @@ def build_layer_mesh(
     obj_name = f"{part.draw_index:03d}_{part.layer_name}"
     obj = bpy.data.objects.new(obj_name, mesh)
     collection.objects.link(obj)
+    _apply_canvas_transform(obj, part)
     obj["hallway_avatar_generated"] = True
     obj["hallway_avatar_layer_path"] = part.layer_path
     obj["hallway_avatar_layer_name"] = part.layer_name
     obj["hallway_avatar_semantic_label"] = part.semantic_label
     obj["hallway_avatar_side_guess"] = part.side_guess
     obj["hallway_avatar_confidence"] = part.confidence
+    logger.info(
+        "Traced %s -> mesh from %sx%s crop in %.3fs",
+        part.layer_path,
+        part.image_size[0],
+        part.image_size[1],
+        trace_seconds,
+    )
     return obj

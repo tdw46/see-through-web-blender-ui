@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import bmesh
 import bpy
+from mathutils import Vector
 
 from .. import properties
 from ..utils import blender as blender_utils
@@ -10,6 +12,7 @@ from . import alpha_mesh_adapter, armature_builder, heuristic_rigger, part_class
 
 logger = get_logger("pipeline")
 ADDON_ID = env.addon_package_id(__package__)
+LAYER_DEPTH_STEP_METERS = 0.0005
 
 
 def _cache_dir_from_context(context: bpy.types.Context) -> str:
@@ -18,6 +21,68 @@ def _cache_dir_from_context(context: bpy.types.Context) -> str:
         return ""
     prefs = addon.preferences
     return getattr(prefs, "cache_dir", "")
+
+
+def _world_min_vertex_z(obj: bpy.types.Object) -> float | None:
+    if obj.type != "MESH" or obj.data is None or not getattr(obj.data, "vertices", None):
+        return None
+    return min((obj.matrix_world @ vertex.co).z for vertex in obj.data.vertices)
+
+
+def _apply_layer_depth_stack(parts: list, imported_objects: list[bpy.types.Object]) -> None:
+    ordered = [(part, obj) for part, obj in zip(parts, imported_objects, strict=False) if obj is not None]
+    if not ordered:
+        return
+
+    for depth_index, (part, obj) in enumerate(ordered):
+        depth_offset = -depth_index * LAYER_DEPTH_STEP_METERS
+        obj.location.y = depth_offset
+        obj["hallway_avatar_depth_offset"] = depth_offset
+        obj["hallway_avatar_depth_rank"] = depth_index
+        obj["hallway_avatar_draw_index"] = part.draw_index
+        logger.info(
+            "Layer stack %s -> draw_index=%s depth_rank=%s world_y=%.6f",
+            obj.name,
+            part.draw_index,
+            depth_index,
+            obj.location.y,
+        )
+
+
+def _lift_imported_meshes_to_ground(imported_objects: list[bpy.types.Object]) -> float:
+    min_values = [value for value in (_world_min_vertex_z(obj) for obj in imported_objects) if value is not None]
+    if not min_values:
+        return 0.0
+
+    min_z = min(min_values)
+    z_offset = -min_z
+    logger.info("Ground snap pre-pass -> global minimum world Z = %.6f, requested offset = %.6f", min_z, z_offset)
+    if abs(z_offset) <= 1e-9:
+        return 0.0
+
+    for obj in imported_objects:
+        before_min_z = _world_min_vertex_z(obj)
+        local_offset = obj.matrix_world.inverted_safe().to_3x3() @ Vector((0.0, 0.0, z_offset))
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bm.verts.ensure_lookup_table()
+        bmesh.ops.translate(bm, verts=bm.verts[:], vec=local_offset)
+        bm.to_mesh(obj.data)
+        bm.free()
+        obj.data.update()
+        obj["hallway_avatar_ground_offset_z"] = z_offset
+        obj["hallway_avatar_ground_min_z_before"] = min_z
+        after_min_z = _world_min_vertex_z(obj)
+        logger.info(
+            "Ground snap %s -> before_min_z=%s after_min_z=%s local_offset=(%.6f, %.6f, %.6f)",
+            obj.name,
+            f"{before_min_z:.6f}" if before_min_z is not None else "None",
+            f"{after_min_z:.6f}" if after_min_z is not None else "None",
+            local_offset.x,
+            local_offset.y,
+            local_offset.z,
+        )
+    return z_offset
 
 
 def import_psd_scene(context: bpy.types.Context, filepath: str) -> list:
@@ -36,9 +101,13 @@ def import_psd_scene(context: bpy.types.Context, filepath: str) -> list:
     part_classifier.classify_parts(parts)
 
     collection = blender_utils.clear_collection(state.imported_collection_name) if state.replace_existing else blender_utils.ensure_collection(state.imported_collection_name)
+    imported_objects: list[bpy.types.Object] = []
 
     for part in parts:
-        if part.skipped:
+        if part.skipped or part.area <= 0 or part.local_alpha_bbox[2] <= part.local_alpha_bbox[0] or part.local_alpha_bbox[3] <= part.local_alpha_bbox[1]:
+            part.skipped = True
+            if not part.skip_reason:
+                part.skip_reason = "empty alpha after rasterization"
             continue
         obj = alpha_mesh_adapter.build_layer_mesh(
             context,
@@ -50,6 +119,17 @@ def import_psd_scene(context: bpy.types.Context, filepath: str) -> list:
         obj["hallway_avatar_semantic_label"] = part.semantic_label
         obj["hallway_avatar_side_guess"] = part.side_guess
         obj["hallway_avatar_confidence"] = part.confidence
+        imported_objects.append(obj)
+
+    _apply_layer_depth_stack([part for part in parts if not part.skipped], imported_objects)
+    context.view_layer.update()
+    z_offset = _lift_imported_meshes_to_ground(imported_objects)
+    context.view_layer.update()
+    if abs(z_offset) > 1e-9:
+        logger.info("Translated imported layer mesh data by %.6fm so the lowest world-space vertex rests at Z=0", z_offset)
+        final_min_values = [value for value in (_world_min_vertex_z(obj) for obj in imported_objects) if value is not None]
+        if final_min_values:
+            logger.info("Ground snap post-pass -> global minimum world Z = %.6f", min(final_min_values))
 
     state.source_psd_path = filepath
     properties.set_layer_items(scene, parts)
