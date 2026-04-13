@@ -33,8 +33,6 @@ def _center_of_bbox(bbox: tuple[float, float, float, float]) -> tuple[float, flo
 NECK_TOKENS = {"neck", "neckwear"}
 HEAD_TOKENS = {
     "face",
-    "front hair",
-    "back hair",
     "headwear",
     "nose",
     "mouth",
@@ -46,6 +44,17 @@ HEAD_TOKENS = {
     "earwear",
 }
 IRIS_TOKENS = {"irides"}
+BODY_UPWARD_BONES = {"root", "hips", "torso", "spine", "neck", "head", "eyes"}
+DOWNWARD_BONES = {"front_hair", "back_hair", "leftArm", "rightArm", "leftElbow", "rightElbow", "bothArms", "leftLeg", "rightLeg", "leftKnee", "rightKnee", "bothLegs"}
+HAIR_CHAIN_LENGTH = 5
+
+
+def _is_body_upward_bone(name: str) -> bool:
+    return name in BODY_UPWARD_BONES
+
+
+def _is_downward_bone(name: str) -> bool:
+    return name in DOWNWARD_BONES or name.startswith("front_hair_") or name.startswith("back_hair_")
 
 
 def _canonical_token(part: LayerPart) -> str:
@@ -250,6 +259,10 @@ def _estimate_keypoints(parts: list[LayerPart]) -> tuple[dict[str, tuple[float, 
 
 def _layer_bone_for_part(part: LayerPart, groups: dict[str, str | bool], centerline_x: float) -> str:
     token = _canonical_token(part)
+    if token == "front hair":
+        return "front_hair"
+    if token == "back hair":
+        return "back_hair"
     if token in IRIS_TOKENS:
         return "eyes"
     if token in NECK_TOKENS:
@@ -259,7 +272,7 @@ def _layer_bone_for_part(part: LayerPart, groups: dict[str, str | bool], centerl
     if token == "topwear":
         return "torso"
     if token == "bottomwear":
-        return "root"
+        return "hips"
     if token == "handwear":
         side = _stretchy_side(part, centerline_x)
         if groups["arms"] == "merged":
@@ -287,11 +300,15 @@ def _tail_target(
     x_value, y_value = keypoints[bone_name]
     default_offset = max(12.0, canvas_size[1] * 0.025)
     targets = {
-        "root": keypoints.get("waist"),
-        "torso": keypoints.get("neck"),
+        "root": keypoints.get("hips"),
+        "hips": keypoints.get("torso"),
+        "torso": keypoints.get("spine"),
+        "spine": keypoints.get("neck"),
         "neck": keypoints.get("head"),
         "head": keypoints.get("eyes"),
         "eyes": (x_value, y_value - default_offset),
+        "front_hair": keypoints.get("front_hair_tip"),
+        "back_hair": keypoints.get("back_hair_tip"),
         "leftArm": keypoints.get("leftElbow") or keypoints.get("lWrist"),
         "rightArm": keypoints.get("rightElbow") or keypoints.get("rWrist"),
         "leftElbow": keypoints.get("lWrist"),
@@ -329,6 +346,22 @@ def _tail_target(
     return target
 
 
+def _subdivide_chain(
+    start_xy: tuple[float, float],
+    end_xy: tuple[float, float],
+    segments: int,
+) -> list[tuple[float, float]]:
+    if segments <= 0:
+        return [start_xy, end_xy]
+    return [
+        (
+            start_xy[0] + (end_xy[0] - start_xy[0]) * (index / segments),
+            start_xy[1] + (end_xy[1] - start_xy[1]) * (index / segments),
+        )
+        for index in range(segments + 1)
+    ]
+
+
 def estimate_rig(parts: list[LayerPart]) -> RigPlan:
     visible = _visible_parts(parts)
     if not visible:
@@ -339,15 +372,38 @@ def estimate_rig(parts: list[LayerPart]) -> RigPlan:
     groups = analyze_groups(visible)
     has_neck = any(_canonical_token(part) in NECK_TOKENS for part in visible)
     has_head = bool(groups["head"]) or any(_canonical_token(part) in HEAD_TOKENS for part in visible)
+    has_front_hair = any(_canonical_token(part) == "front hair" for part in visible)
+    has_back_hair = any(_canonical_token(part) == "back hair" for part in visible)
     has_left_arm = _has_token_side(visible, "handwear", "LEFT", centerline_x)
     has_right_arm = _has_token_side(visible, "handwear", "RIGHT", centerline_x)
     has_left_leg = _has_token_side(visible, "legwear", "LEFT", centerline_x)
     has_right_leg = _has_token_side(visible, "legwear", "RIGHT", centerline_x)
+
+    front_hair_bbox = _first_bbox(visible, "front hair")
+    back_hair_bbox = _first_bbox(visible, "back hair")
+
+    def hair_points(bbox: tuple[float, float, float, float] | None, fallback_x: float) -> tuple[tuple[float, float], tuple[float, float]]:
+        if bbox is None:
+            head_xy = (fallback_x, keypoints["headBase"][1] - canvas_size[1] * 0.06)
+            tail_xy = (fallback_x, head_xy[1] + canvas_size[1] * 0.12)
+            return head_xy, tail_xy
+        x0, y0, x1, y1 = bbox
+        center_x = (x0 + x1) * 0.5
+        head_y = y0 + (y1 - y0) * 0.18
+        tail_y = y0 + (y1 - y0) * 0.92
+        return (center_x, head_y), (center_x, tail_y)
+
+    front_hair_head, front_hair_tail = hair_points(front_hair_bbox, keypoints["headBase"][0])
+    back_hair_head, back_hair_tail = hair_points(back_hair_bbox, keypoints["headBase"][0])
     need_group = {
         "root": True,
+        "hips": True,
         "torso": bool(groups["torso"]) or has_neck or has_head,
+        "spine": bool(groups["torso"]) or has_neck or has_head,
         "neck": has_neck or has_head,
         "head": has_head,
+        "front_hair": has_front_hair,
+        "back_hair": has_back_hair,
         "eyes": any(_canonical_token(part) in IRIS_TOKENS for part in visible),
         "leftArm": groups["arms"] == "split" or (groups["arms"] == "partial" and has_left_arm),
         "rightArm": groups["arms"] == "split" or (groups["arms"] == "partial" and has_right_arm),
@@ -362,26 +418,34 @@ def estimate_rig(parts: list[LayerPart]) -> RigPlan:
     }
     parent_lookup = {
         "root": None,
-        "torso": "root",
-        "neck": "torso" if need_group["torso"] else "root",
+        "hips": "root",
+        "torso": "hips" if need_group["hips"] else "root",
+        "spine": "torso" if need_group["torso"] else ("hips" if need_group["hips"] else "root"),
+        "neck": "spine" if need_group["spine"] else ("torso" if need_group["torso"] else "root"),
         "head": "neck" if need_group["neck"] else ("torso" if need_group["torso"] else "root"),
+        "front_hair": "head" if need_group["head"] else ("neck" if need_group["neck"] else "root"),
+        "back_hair": "head" if need_group["head"] else ("neck" if need_group["neck"] else "root"),
         "eyes": "head" if need_group["head"] else ("neck" if need_group["neck"] else "root"),
-        "leftArm": "torso" if need_group["torso"] else "root",
-        "rightArm": "torso" if need_group["torso"] else "root",
-        "leftElbow": "leftArm" if need_group["leftArm"] else ("torso" if need_group["torso"] else "root"),
-        "rightElbow": "rightArm" if need_group["rightArm"] else ("torso" if need_group["torso"] else "root"),
-        "bothArms": "torso" if need_group["torso"] else "root",
-        "leftLeg": "root",
-        "rightLeg": "root",
+        "leftArm": "spine" if need_group["spine"] else ("torso" if need_group["torso"] else "root"),
+        "rightArm": "spine" if need_group["spine"] else ("torso" if need_group["torso"] else "root"),
+        "leftElbow": "leftArm" if need_group["leftArm"] else ("spine" if need_group["spine"] else "root"),
+        "rightElbow": "rightArm" if need_group["rightArm"] else ("spine" if need_group["spine"] else "root"),
+        "bothArms": "spine" if need_group["spine"] else ("torso" if need_group["torso"] else "root"),
+        "leftLeg": "hips",
+        "rightLeg": "hips",
         "leftKnee": "leftLeg" if need_group["leftLeg"] else "root",
         "rightKnee": "rightLeg" if need_group["rightLeg"] else "root",
-        "bothLegs": "root",
+        "bothLegs": "hips",
     }
     pivot_points = {
-        "root": keypoints["pelvis"],
+        "root": (keypoints["pelvis"][0], keypoints["pelvis"][1] + canvas_size[1] * 0.08),
+        "hips": keypoints["pelvis"],
         "torso": keypoints["waist"],
+        "spine": keypoints["spine"],
         "neck": keypoints["neck"],
         "head": keypoints.get("headBase", keypoints["midEye"]),
+        "front_hair": front_hair_head,
+        "back_hair": back_hair_head,
         "eyes": keypoints["midEye"],
         "leftArm": keypoints["lShoulder"],
         "rightArm": keypoints["rShoulder"],
@@ -393,10 +457,14 @@ def estimate_rig(parts: list[LayerPart]) -> RigPlan:
         "leftKnee": keypoints.get("lKnee", keypoints["lHip"]),
         "rightKnee": keypoints.get("rKnee", keypoints["rHip"]),
         "bothLegs": keypoints["pelvis"],
+        "front_hair_tip": front_hair_tail,
+        "back_hair_tip": back_hair_tail,
     }
     create_order = [
         "root",
+        "hips",
         "torso",
+        "spine",
         "neck",
         "head",
         "eyes",
@@ -411,9 +479,14 @@ def estimate_rig(parts: list[LayerPart]) -> RigPlan:
         "rightKnee",
         "bothLegs",
     ]
+    hair_chain_map: dict[str, tuple[str, ...]] = {}
     bones: dict[str, BonePlan] = {}
 
     def add_bone(name: str, head_xy: tuple[float, float], tail_xy: tuple[float, float], parent: str | None) -> None:
+        if _is_body_upward_bone(name) and head_xy[1] < tail_xy[1]:
+            head_xy, tail_xy = tail_xy, head_xy
+        if _is_downward_bone(name) and head_xy[1] > tail_xy[1]:
+            head_xy, tail_xy = tail_xy, head_xy
         bones[name] = BonePlan(
             name=name,
             head=_pixel_to_plane(head_xy[0], head_xy[1], canvas_size),
@@ -428,13 +501,48 @@ def estimate_rig(parts: list[LayerPart]) -> RigPlan:
         tail_xy = _tail_target(bone_name, pivot_points | keypoints, canvas_size)
         add_bone(bone_name, head_xy, tail_xy, parent_lookup[bone_name])
 
+    if need_group["front_hair"]:
+        points = _subdivide_chain(front_hair_head, front_hair_tail, HAIR_CHAIN_LENGTH)
+        names: list[str] = []
+        parent_name = "head"
+        for index in range(HAIR_CHAIN_LENGTH):
+            bone_name = f"front_hair_{index + 1:02d}"
+            add_bone(bone_name, points[index], points[index + 1], parent_name)
+            names.append(bone_name)
+            parent_name = bone_name
+        hair_chain_map["front_hair"] = tuple(names)
+
+    if need_group["back_hair"]:
+        points = _subdivide_chain(back_hair_head, back_hair_tail, HAIR_CHAIN_LENGTH)
+        names: list[str] = []
+        parent_name = "head"
+        for index in range(HAIR_CHAIN_LENGTH):
+            bone_name = f"back_hair_{index + 1:02d}"
+            add_bone(bone_name, points[index], points[index + 1], parent_name)
+            names.append(bone_name)
+            parent_name = bone_name
+        hair_chain_map["back_hair"] = tuple(names)
+
     layer_bone_map = {
         part.layer_path: _layer_bone_for_part(part, groups, centerline_x)
         for part in visible
     }
+    layer_auto_weight_bones: dict[str, tuple[str, ...]] = {}
+    body_chain = tuple(name for name in ("root", "hips", "torso", "spine", "neck", "head") if name in bones)
+    for part in visible:
+        token = _canonical_token(part)
+        if token == "topwear" and body_chain:
+            layer_auto_weight_bones[part.layer_path] = body_chain
+        elif token == "front hair" and "front_hair" in hair_chain_map:
+            layer_auto_weight_bones[part.layer_path] = hair_chain_map["front_hair"]
+            layer_bone_map[part.layer_path] = hair_chain_map["front_hair"][0]
+        elif token == "back hair" and "back_hair" in hair_chain_map:
+            layer_auto_weight_bones[part.layer_path] = hair_chain_map["back_hair"]
+            layer_bone_map[part.layer_path] = hair_chain_map["back_hair"][0]
     confidence_values = [part.confidence for part in visible if part.confidence > 0.0]
     confidence = sum(confidence_values) / len(confidence_values) if confidence_values else 0.25
-    joint_pixels = {name: pivot_points[name] for name in create_order if need_group[name]}
+    joint_pixels = {name: pivot_points[name] for name in create_order if need_group.get(name)}
+    joint_pixels.update({"front_hair_tip": front_hair_tail, "back_hair_tip": back_hair_tail})
     group_states = {key: str(value) for key, value in groups.items()}
     return RigPlan(
         bones=bones,
@@ -442,6 +550,7 @@ def estimate_rig(parts: list[LayerPart]) -> RigPlan:
         centerline_x=centerline_x,
         method="stretchy_studio_bounds",
         layer_bone_map=layer_bone_map,
+        layer_auto_weight_bones=layer_auto_weight_bones,
         joint_pixels=joint_pixels,
         group_states=group_states,
     )

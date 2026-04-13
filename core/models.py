@@ -47,5 +47,6 @@ class RigPlan:
     centerline_x: float = 0.0
     method: str = ""
     layer_bone_map: dict[str, str] = field(default_factory=dict)
+    layer_auto_weight_bones: dict[str, tuple[str, ...]] = field(default_factory=dict)
     joint_pixels: dict[str, tuple[float, float]] = field(default_factory=dict)
     group_states: dict[str, str] = field(default_factory=dict)
