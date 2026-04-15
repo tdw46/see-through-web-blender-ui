@@ -34,6 +34,9 @@ def load_psd_layer_parts(
     ignore_hidden_layers: bool = True,
     ignore_empty_layers: bool = True,
     min_visible_pixels: int = 8,
+    alpha_noise_floor: int = 64,
+    visible_alpha_threshold: int = 32,
+    auto_alpha_threshold_boost: bool = True,
     keep_tiny_named_parts: bool = True,
     configured_cache_dir: str = "",
 ) -> list[LayerPart]:
@@ -122,7 +125,12 @@ def load_psd_layer_parts(
                 continue
 
             image = psd_layer_filters.ensure_rgba(image)
-            stats = psd_layer_filters.visible_pixel_stats(image)
+            stats = psd_layer_filters.visible_pixel_stats(
+                image,
+                threshold=visible_alpha_threshold,
+                noise_floor=alpha_noise_floor,
+                auto_boost_threshold=auto_alpha_threshold_boost,
+            )
             visible_pixels = int(stats["visible_pixels"])
             local_bbox = tuple(int(value) for value in stats["local_bbox"])
             centroid = tuple(float(value) for value in stats["centroid"])

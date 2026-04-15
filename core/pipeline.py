@@ -111,6 +111,9 @@ def import_psd_scene(context: bpy.types.Context, filepath: str) -> list:
         ignore_hidden_layers=state.ignore_hidden_layers,
         ignore_empty_layers=state.ignore_empty_layers,
         min_visible_pixels=state.min_visible_pixels,
+        alpha_noise_floor=state.alpha_noise_floor,
+        visible_alpha_threshold=state.visible_alpha_threshold,
+        auto_alpha_threshold_boost=state.auto_alpha_threshold_boost,
         keep_tiny_named_parts=state.keep_tiny_named_parts,
         configured_cache_dir=cache_dir,
     )
@@ -130,6 +133,7 @@ def import_psd_scene(context: bpy.types.Context, filepath: str) -> list:
             part,
             collection,
             grid_resolution=state.mesh_grid_resolution,
+            trace_contrast_remap=(state.trace_contrast_low, state.trace_contrast_high),
         )
         part.imported_object_name = obj.name
         obj["hallway_avatar_semantic_label"] = part.semantic_label

@@ -26,6 +26,15 @@ def _pixel_to_plane(x: float, y: float, canvas_size: tuple[int, int]) -> tuple[f
 
 
 def _trace_pixels_to_bmesh(part: LayerPart, context: bpy.types.Context) -> bmesh.types.BMesh:
+    return _trace_pixels_to_bmesh_with_contrast(part, context, contrast_remap=(0.1, 0.9))
+
+
+def _trace_pixels_to_bmesh_with_contrast(
+    part: LayerPart,
+    context: bpy.types.Context,
+    *,
+    contrast_remap: tuple[float, float],
+) -> bmesh.types.BMesh:
     env.import_optional("vtracer")
     mesher = importlib.import_module(f"{__package__}.import_meshed_alpha_vendor.alpha_mesher")
     pixels = mesher.preprocess_image(
@@ -35,7 +44,7 @@ def _trace_pixels_to_bmesh(part: LayerPart, context: bpy.types.Context) -> bmesh
         False,
         0,
         False,
-        (0.1, 0.9),
+        contrast_remap,
         1.0,
         None,
     )
@@ -101,10 +110,13 @@ def build_layer_mesh(
     collection: bpy.types.Collection,
     *,
     grid_resolution: int = 12,
+    trace_contrast_remap: tuple[float, float] = (0.1, 0.9),
 ) -> bpy.types.Object:
     mesh = bpy.data.meshes.new(f"{part.layer_name}_mesh")
     trace_start = perf_counter()
-    bm = _trace_pixels_to_bmesh(part, context)
+    low, high = trace_contrast_remap
+    contrast_remap = (min(low, high), max(low, high))
+    bm = _trace_pixels_to_bmesh_with_contrast(part, context, contrast_remap=contrast_remap)
     bm.to_mesh(mesh)
     bm.free()
     mesh.update()
@@ -130,10 +142,12 @@ def build_layer_mesh(
     obj["hallway_avatar_side_guess"] = part.side_guess
     obj["hallway_avatar_confidence"] = part.confidence
     logger.info(
-        "Traced %s -> mesh from %sx%s crop in %.3fs",
+        "Traced %s -> mesh from %sx%s crop in %.3fs (contrast remap %.3f..%.3f)",
         part.layer_path,
         part.image_size[0],
         part.image_size[1],
         trace_seconds,
+        contrast_remap[0],
+        contrast_remap[1],
     )
     return obj

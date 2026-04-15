@@ -26,6 +26,8 @@ MODULES = [
     "operators.install_dependencies",
     "operators.import_psd",
     "operators.classify_parts",
+    "operators.set_bool",
+    "operators.reset_settings",
     "operators.remesh_imports",
     "operators.build_armature",
     "operators.bind_weights",
