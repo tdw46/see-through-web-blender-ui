@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bpy
+from mathutils import Vector
 
 from ..utils import blender as blender_utils
 from ..utils.logging import get_logger
@@ -11,6 +12,8 @@ from .voxel_binding import VoxelBindingSettings, run_voxel_heat_diffuse
 logger = get_logger("weighting")
 
 HAIR_SMOOTH_REPEAT = 80
+SPLIT_FRONT_HAIR_PRE_BRIDGE_SMOOTH_REPEAT = 60
+SPLIT_FRONT_HAIR_POST_BRIDGE_SMOOTH_REPEAT = 20
 OTHER_SMOOTH_REPEAT = 100
 HAIR_BONE_PREFIXES = ("front_hair_", "back_hair_")
 HEAD_PRIORITY_TOKENS = {
@@ -59,6 +62,27 @@ def _ensure_group(obj: bpy.types.Object, bone_name: str) -> bpy.types.VertexGrou
     if group is None:
         group = obj.vertex_groups.new(name=bone_name)
     return group
+
+
+def _group_weight(group: bpy.types.VertexGroup | None, vertex_index: int) -> float:
+    if group is None:
+        return 0.0
+    try:
+        return group.weight(vertex_index)
+    except RuntimeError:
+        return 0.0
+
+
+def _set_normalized_weights(
+    vertex_index: int,
+    weight_map: dict[bpy.types.VertexGroup, float],
+) -> None:
+    clamped = {group: max(0.0, weight) for group, weight in weight_map.items() if group is not None}
+    total = sum(clamped.values())
+    if total <= 1e-8:
+        return
+    for group, weight in clamped.items():
+        group.add([vertex_index], weight / total, "REPLACE")
 
 
 def _assign_rigid(obj: bpy.types.Object, bone_name: str) -> None:
@@ -247,6 +271,84 @@ def _override_head_weights(
             group.add([vertex.index], 0.0, "REPLACE")
 
 
+def _apply_split_front_hair_head_bridge(
+    obj: bpy.types.Object,
+    armature_obj: bpy.types.Object,
+    bone_names: tuple[str, ...],
+) -> bool:
+    if armature_obj.data.bones.get("head") is None:
+        return False
+    if not any(name.startswith("front_hair_left_") for name in bone_names):
+        return False
+    if not any(name.startswith("front_hair_right_") for name in bone_names):
+        return False
+
+    head_bone = armature_obj.data.bones["head"]
+    head_head_world = armature_obj.matrix_world @ head_bone.head_local
+    head_tail_world = armature_obj.matrix_world @ head_bone.tail_local
+    center_x = (head_head_world.x + head_tail_world.x) * 0.5
+    head_mid_z = (head_head_world.z + head_tail_world.z) * 0.5
+    head_top_z = max(head_head_world.z, head_tail_world.z)
+    head_length = max((head_tail_world - head_head_world).length, 1e-6)
+
+    world_positions = [obj.matrix_world @ vertex.co for vertex in obj.data.vertices]
+    if not world_positions:
+        return
+    object_x_values = [co.x for co in world_positions]
+    object_z_values = [co.z for co in world_positions]
+    object_top_z = max(object_z_values)
+    top_band_bottom_z = head_mid_z
+    top_band_top_z = max(object_top_z, head_top_z)
+    if top_band_top_z <= top_band_bottom_z:
+        top_band_top_z = top_band_bottom_z + max(head_length * 0.25, 1e-4)
+
+    center_half_width = max(head_length * 0.35, (max(object_x_values) - min(object_x_values)) * 0.12, 1e-4)
+    head_group = _ensure_group(obj, "head")
+    strand_groups = [
+        obj.vertex_groups.get(name)
+        for name in bone_names
+        if name != "head" and (name.startswith("front_hair_left_") or name.startswith("front_hair_right_"))
+    ]
+    strand_groups = [group for group in strand_groups if group is not None]
+    if not strand_groups:
+        return False
+
+    affected = 0
+    for vertex, world_co in zip(obj.data.vertices, world_positions, strict=False):
+        if world_co.z < top_band_bottom_z:
+            continue
+        x_factor = 1.0 - min(abs(world_co.x - center_x) / center_half_width, 1.0)
+        if x_factor <= 0.0:
+            continue
+        z_factor = min(max((world_co.z - top_band_bottom_z) / (top_band_top_z - top_band_bottom_z), 0.0), 1.0)
+        target_head_weight = x_factor * z_factor
+        if target_head_weight <= 0.0:
+            continue
+
+        current_head_weight = _group_weight(head_group, vertex.index)
+        new_head_weight = max(current_head_weight, target_head_weight)
+        remaining_scale = max(0.0, 1.0 - new_head_weight)
+        weight_map: dict[bpy.types.VertexGroup, float] = {head_group: new_head_weight}
+        for group in strand_groups:
+            current_weight = _group_weight(group, vertex.index)
+            if current_weight > 0.0:
+                weight_map[group] = current_weight * remaining_scale
+        _set_normalized_weights(vertex.index, weight_map)
+        affected += 1
+
+    if affected:
+        logger.info(
+            "Applied split front hair head bridge on %s -> affected=%s center_x=%.6f top_band_bottom_z=%.6f top_band_top_z=%.6f center_half_width=%.6f",
+            obj.name,
+            affected,
+            center_x,
+            top_band_bottom_z,
+            top_band_top_z,
+            center_half_width,
+        )
+    return affected > 0
+
+
 def bind_parts(
     context: bpy.types.Context,
     armature_obj: bpy.types.Object,
@@ -270,11 +372,16 @@ def bind_parts(
             filtered_auto_bones = _filtered_bone_names_for_part(part, armature_obj, auto_bones)
             success = _apply_voxel_weights(context, part, obj, armature_obj, filtered_auto_bones)
             if success:
-                _smooth_weights(
-                    context,
-                    obj,
-                    HAIR_SMOOTH_REPEAT if token in {"front hair", "back hair"} else OTHER_SMOOTH_REPEAT,
-                )
+                if token == "front hair" and _apply_split_front_hair_head_bridge(obj, armature_obj, filtered_auto_bones):
+                    _smooth_weights(context, obj, SPLIT_FRONT_HAIR_PRE_BRIDGE_SMOOTH_REPEAT)
+                    _apply_split_front_hair_head_bridge(obj, armature_obj, filtered_auto_bones)
+                    _smooth_weights(context, obj, SPLIT_FRONT_HAIR_POST_BRIDGE_SMOOTH_REPEAT)
+                else:
+                    _smooth_weights(
+                        context,
+                        obj,
+                        HAIR_SMOOTH_REPEAT if token in {"front hair", "back hair"} else OTHER_SMOOTH_REPEAT,
+                    )
                 if token == "topwear":
                     _override_head_weights(obj, armature_obj, filtered_auto_bones)
                 elif token in HEAD_PRIORITY_TOKENS:

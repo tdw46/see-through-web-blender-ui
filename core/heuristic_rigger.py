@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from math import ceil, floor, hypot
 
+import bpy
+
 from .models import BonePlan, LayerPart, RigPlan
 from . import seethrough_naming
+from ..utils.logging import get_logger
+
+
+logger = get_logger("heuristic_rigger")
 
 
 def _visible_parts(parts: list[LayerPart]) -> list[LayerPart]:
@@ -370,6 +376,23 @@ def _distance_2d(a: tuple[float, float], b: tuple[float, float]) -> float:
     return hypot(b[0] - a[0], b[1] - a[1])
 
 
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    count = len(ordered)
+    if count == 0:
+        return 0.0
+    mid = count // 2
+    if count % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) * 0.5
+
+
+def _plane_to_pixel(x: float, z: float, canvas_size: tuple[int, int]) -> tuple[float, float]:
+    scale = 2.0 / max(1.0, float(max(canvas_size)))
+    canvas_w, canvas_h = canvas_size
+    return ((x / scale) + canvas_w * 0.5, canvas_h * 0.5 - (z / scale))
+
+
 def _hair_chain_length(total_length: float, face_bone_length: float) -> int:
     if total_length <= 1e-6:
         return 1
@@ -402,6 +425,200 @@ def _bone_collection_name(name: str) -> str:
     if name in {"leftLeg", "rightLeg", "leftKnee", "rightKnee", "bothLegs"}:
         return "Legs"
     return "Body"
+
+
+def _detect_split_front_hair_strands(
+    part: LayerPart,
+    *,
+    centerline_x: float,
+    canvas_size: tuple[int, int],
+    head_mid_world_z: float,
+    head_tail_world_z: float,
+    ground_offset_z: float = 0.0,
+) -> tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+] | None:
+    if not part.imported_object_name:
+        logger.info("Front hair split reject %s -> no imported object name", part.layer_name or part.layer_path)
+        return None
+    obj = bpy.data.objects.get(part.imported_object_name)
+    if obj is None or obj.type != "MESH" or obj.data is None or len(obj.data.vertices) < 8:
+        logger.info(
+            "Front hair split reject %s -> invalid mesh object obj=%s type=%s verts=%s",
+            part.layer_name or part.layer_path,
+            getattr(obj, "name", None),
+            getattr(obj, "type", None),
+            len(obj.data.vertices) if obj and obj.type == "MESH" and obj.data is not None else 0,
+        )
+        return None
+
+    world_points = []
+    for vertex in obj.data.vertices:
+        world_co = obj.matrix_world @ vertex.co
+        world_points.append((world_co.x, world_co.z))
+    if not world_points:
+        logger.info("Front hair split reject %s -> no world points", part.layer_name or part.layer_path)
+        return None
+
+    world_centerline_x = _pixel_to_plane(centerline_x, canvas_size[1] * 0.5, canvas_size)[0]
+    world_x_values = [point[0] for point in world_points]
+    world_z_values = [point[1] for point in world_points]
+    width = max(world_x_values) - min(world_x_values)
+    if width <= 1e-6:
+        logger.info("Front hair split reject %s -> zero width", part.layer_name or part.layer_path)
+        return None
+
+    world_scale = 2.0 / max(1.0, float(max(canvas_size)))
+    slice_half_width = max(width * 0.10, 6.0 * world_scale)
+    left_points = [point for point in world_points if point[0] < world_centerline_x - slice_half_width]
+    right_points = [point for point in world_points if point[0] > world_centerline_x + slice_half_width]
+    center_points = [point for point in world_points if abs(point[0] - world_centerline_x) <= slice_half_width]
+
+    total_points = len(world_points)
+    min_side_count = max(6, int(total_points * 0.18))
+    min_center_count = max(3, int(total_points * 0.02))
+    if len(left_points) < min_side_count or len(right_points) < min_side_count or len(center_points) < min_center_count:
+        logger.info(
+            "Front hair split reject %s -> insufficient point groups left=%s/%s right=%s/%s center=%s/%s width=%.3f slice_half_width=%.3f",
+            part.layer_name or part.layer_path,
+            len(left_points),
+            min_side_count,
+            len(right_points),
+            min_side_count,
+            len(center_points),
+            min_center_count,
+            width,
+            slice_half_width,
+        )
+        return None
+
+    center_mass_world_z = sum(point[1] for point in center_points) / len(center_points)
+    left_median_z = _median([point[1] for point in left_points])
+    right_median_z = _median([point[1] for point in right_points])
+    left_strand_points = [point for point in left_points if point[1] <= left_median_z]
+    right_strand_points = [point for point in right_points if point[1] <= right_median_z]
+    left_center_world_z = sum(point[1] for point in left_strand_points) / len(left_strand_points)
+    right_center_world_z = sum(point[1] for point in right_strand_points) / len(right_strand_points)
+    if center_mass_world_z <= head_tail_world_z:
+        logger.info(
+            "Front hair split reject %s -> center COM not above head tail center_mass_world_z=%.6f head_tail_world_z=%.6f head_mid_world_z=%.6f",
+            part.layer_name or part.layer_path,
+            center_mass_world_z,
+            head_tail_world_z,
+            head_mid_world_z,
+        )
+        return None
+    if left_center_world_z >= head_mid_world_z or right_center_world_z >= head_mid_world_z:
+        logger.info(
+            "Front hair split reject %s -> side COM not below head midpoint left_center_world_z=%.6f right_center_world_z=%.6f head_mid_world_z=%.6f head_tail_world_z=%.6f left_strand_count=%s right_strand_count=%s",
+            part.layer_name or part.layer_path,
+            left_center_world_z,
+            right_center_world_z,
+            head_mid_world_z,
+            head_tail_world_z,
+            len(left_strand_points),
+            len(right_strand_points),
+        )
+        return None
+
+    left_x_values = [point[0] for point in left_points]
+    right_x_values = [point[0] for point in right_points]
+
+    root_sample_count = max(6, int(total_points * 0.04))
+    left_root_points = sorted(
+        (point for point in world_points if point[0] <= world_centerline_x),
+        key=lambda point: abs(point[0] - world_centerline_x),
+    )[:root_sample_count]
+    right_root_points = sorted(
+        (point for point in world_points if point[0] >= world_centerline_x),
+        key=lambda point: abs(point[0] - world_centerline_x),
+    )[:root_sample_count]
+    if len(left_root_points) < 3 or len(right_root_points) < 3:
+        logger.info(
+            "Front hair split reject %s -> insufficient symmetry-near root points left=%s right=%s root_sample_count=%s",
+            part.layer_name or part.layer_path,
+            len(left_root_points),
+            len(right_root_points),
+            root_sample_count,
+        )
+        return None
+    left_root_top_points = [point for point in left_root_points if point[1] >= _median([value[1] for value in left_root_points])]
+    right_root_top_points = [point for point in right_root_points if point[1] >= _median([value[1] for value in right_root_points])]
+    if left_root_top_points:
+        left_root_points = left_root_top_points
+    if right_root_top_points:
+        right_root_points = right_root_top_points
+
+    if part.alpha_bbox[2] > part.alpha_bbox[0] and part.alpha_bbox[3] > part.alpha_bbox[1]:
+        _, y0, _, y1 = part.alpha_bbox
+        head_plane_z = _pixel_to_plane(centerline_x, y0 + (y1 - y0) * 0.18, canvas_size)[2]
+        tail_plane_z = _pixel_to_plane(centerline_x, y0 + (y1 - y0) * 0.92, canvas_size)[2]
+    else:
+        max_world_z = max(world_z_values)
+        height = max(max_world_z - min(world_z_values), 1.0e-6)
+        head_plane_z = (max_world_z - height * 0.18) - ground_offset_z
+        tail_plane_z = (max_world_z - height * 0.92) - ground_offset_z
+
+    left_offset = world_centerline_x - ((min(left_x_values) + max(left_x_values)) * 0.5)
+    right_offset = ((min(right_x_values) + max(right_x_values)) * 0.5) - world_centerline_x
+    strand_offset = max((left_offset + right_offset) * 0.5, slice_half_width * 1.1)
+    left_root_offset = sum(world_centerline_x - point[0] for point in left_root_points) / len(left_root_points)
+    right_root_offset = sum(point[0] - world_centerline_x for point in right_root_points) / len(right_root_points)
+    mirrored_root_offset = max((left_root_offset + right_root_offset) * 0.5, 1.0e-6)
+    shared_root_world_z = (
+        sum(point[1] for point in left_root_points) + sum(point[1] for point in right_root_points)
+    ) / (len(left_root_points) + len(right_root_points))
+    shared_root_plane_z = shared_root_world_z - ground_offset_z
+    left_root = (world_centerline_x - mirrored_root_offset, shared_root_plane_z)
+    right_root = (world_centerline_x + mirrored_root_offset, shared_root_plane_z)
+    left_head = (world_centerline_x - strand_offset, head_plane_z)
+    left_tail = (world_centerline_x - strand_offset, tail_plane_z)
+    right_head = (world_centerline_x + strand_offset, head_plane_z)
+    right_tail = (world_centerline_x + strand_offset, tail_plane_z)
+    left_root_pixel = _plane_to_pixel(left_root[0], left_root[1], canvas_size)
+    left_head_pixel = _plane_to_pixel(left_head[0], left_head[1], canvas_size)
+    left_tail_pixel = _plane_to_pixel(left_tail[0], left_tail[1], canvas_size)
+    right_root_pixel = _plane_to_pixel(right_root[0], right_root[1], canvas_size)
+    right_head_pixel = _plane_to_pixel(right_head[0], right_head[1], canvas_size)
+    right_tail_pixel = _plane_to_pixel(right_tail[0], right_tail[1], canvas_size)
+
+    logger.info(
+        "Front hair split accept %s -> center_mass_world_z=%.6f head_tail_world_z=%.6f left_center_world_z=%.6f right_center_world_z=%.6f head_mid_world_z=%.6f strand_offset=%.6f head_plane_z=%.6f tail_plane_z=%.6f left_root_world=(%.6f, %.6f) right_root_world=(%.6f, %.6f) counts(left=%s right=%s center=%s left_strand=%s right_strand=%s left_root=%s right_root=%s)",
+        part.layer_name or part.layer_path,
+        center_mass_world_z,
+        head_tail_world_z,
+        left_center_world_z,
+        right_center_world_z,
+        head_mid_world_z,
+        strand_offset,
+        head_plane_z,
+        tail_plane_z,
+        left_root[0],
+        shared_root_world_z,
+        right_root[0],
+        shared_root_world_z,
+        len(left_points),
+        len(right_points),
+        len(center_points),
+        len(left_strand_points),
+        len(right_strand_points),
+        len(left_root_points),
+        len(right_root_points),
+    )
+
+    return (
+        left_root_pixel,
+        left_head_pixel,
+        left_tail_pixel,
+        right_root_pixel,
+        right_head_pixel,
+        right_tail_pixel,
+    )
 
 
 def estimate_rig(parts: list[LayerPart]) -> RigPlan:
@@ -556,17 +773,73 @@ def estimate_rig(parts: list[LayerPart]) -> RigPlan:
     if face_reference_length <= 1e-6:
         face_reference_length = max(visible[0].canvas_size[1] * 0.08, 1.0)
 
+    head_tail_xy = _tail_target("head", pivot_points | keypoints, canvas_size)
+    ground_offset_z = 0.0
+    for visible_part in visible:
+        if not visible_part.imported_object_name:
+            continue
+        visible_obj = bpy.data.objects.get(visible_part.imported_object_name)
+        if visible_obj is None:
+            continue
+        ground_offset_z = float(visible_obj.get("hallway_avatar_ground_offset_z", 0.0))
+        break
+    head_head_plane = _pixel_to_plane(pivot_points["head"][0], pivot_points["head"][1], canvas_size)
+    head_tail_plane = _pixel_to_plane(head_tail_xy[0], head_tail_xy[1], canvas_size)
+    head_mid_world_z = ((head_head_plane[2] + head_tail_plane[2]) * 0.5) + ground_offset_z
+    head_tail_world_z = head_tail_plane[2] + ground_offset_z
+
     if need_group["front_hair"]:
-        front_segments = _hair_chain_length(_distance_2d(front_hair_head, front_hair_tail), face_reference_length)
-        points = _subdivide_chain(front_hair_head, front_hair_tail, front_segments)
-        names: list[str] = []
-        parent_name = "head"
-        for index in range(front_segments):
-            bone_name = f"front_hair_{index + 1:02d}"
-            add_bone(bone_name, points[index], points[index + 1], parent_name, connected=index > 0)
-            names.append(bone_name)
-            parent_name = bone_name
-        hair_chain_map["front_hair"] = tuple(names)
+        split_front_hair = next((part for part in visible if _canonical_token(part) == "front hair"), None)
+        split_layout = None
+        if split_front_hair is not None:
+            split_layout = _detect_split_front_hair_strands(
+                split_front_hair,
+                centerline_x=centerline_x,
+                canvas_size=canvas_size,
+                head_mid_world_z=head_mid_world_z,
+                head_tail_world_z=head_tail_world_z,
+                ground_offset_z=ground_offset_z,
+            )
+
+        if split_layout is not None:
+            left_root, left_head, left_tail, right_root, right_head, right_tail = split_layout
+            front_segments = _hair_chain_length(
+                (_distance_2d(left_head, left_tail) + _distance_2d(right_head, right_tail)) * 0.5,
+                face_reference_length,
+            )
+            left_points = _subdivide_chain(left_head, left_tail, front_segments)
+            right_points = _subdivide_chain(right_head, right_tail, front_segments)
+            names: list[str] = []
+            left_top_name = "front_hair_left_top"
+            right_top_name = "front_hair_right_top"
+            add_bone(left_top_name, left_root, left_head, "head")
+            add_bone(right_top_name, right_root, right_head, "head")
+            names.append(left_top_name)
+            parent_name = left_top_name
+            for index in range(front_segments):
+                bone_name = f"front_hair_left_{index + 1:02d}"
+                add_bone(bone_name, left_points[index], left_points[index + 1], parent_name, connected=True)
+                names.append(bone_name)
+                parent_name = bone_name
+            names.append(right_top_name)
+            parent_name = right_top_name
+            for index in range(front_segments):
+                bone_name = f"front_hair_right_{index + 1:02d}"
+                add_bone(bone_name, right_points[index], right_points[index + 1], parent_name, connected=True)
+                names.append(bone_name)
+                parent_name = bone_name
+            hair_chain_map["front_hair"] = tuple(names)
+        else:
+            front_segments = _hair_chain_length(_distance_2d(front_hair_head, front_hair_tail), face_reference_length)
+            points = _subdivide_chain(front_hair_head, front_hair_tail, front_segments)
+            names: list[str] = []
+            parent_name = "head"
+            for index in range(front_segments):
+                bone_name = f"front_hair_{index + 1:02d}"
+                add_bone(bone_name, points[index], points[index + 1], parent_name, connected=index > 0)
+                names.append(bone_name)
+                parent_name = bone_name
+            hair_chain_map["front_hair"] = tuple(names)
 
     if need_group["back_hair"]:
         back_segments = _hair_chain_length(_distance_2d(back_hair_head, back_hair_tail), face_reference_length)
