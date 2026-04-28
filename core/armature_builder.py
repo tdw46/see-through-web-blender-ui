@@ -39,6 +39,7 @@ def build_armature(
         edit_bone.tail = Vector(bone_plan.tail) + bone_offset
         if (edit_bone.tail - edit_bone.head).length < 0.001:
             edit_bone.tail.z += 0.05
+        edit_bone.use_deform = bone_plan.deform
         edit_bones[bone_plan.name] = edit_bone
 
     for bone_plan in rig_plan.bones.values():
@@ -57,12 +58,17 @@ def build_armature(
         if collection is None:
             collection = armature_data.collections.new(collection_name)
         bone_collections[collection_name] = collection
+    collection_has_deform_bone = {collection_name: False for collection_name in collection_names}
     for bone_plan in rig_plan.bones.values():
         collection_name = bone_plan.collection_name or "Body"
         bone = armature_data.bones.get(bone_plan.name)
         collection = bone_collections.get(collection_name)
         if bone is not None and collection is not None:
             collection.assign(bone)
+            if bone_plan.deform:
+                collection_has_deform_bone[collection_name] = True
+    for collection_name, collection in bone_collections.items():
+        collection.is_visible = bool(collection_has_deform_bone.get(collection_name, False))
 
     armature_obj["hallway_avatar_edit_bone_offset_x"] = bone_offset.x
     armature_obj["hallway_avatar_edit_bone_offset_y"] = bone_offset.y

@@ -50,6 +50,14 @@ def _ensure_armature_modifier(obj: bpy.types.Object, armature_obj: bpy.types.Obj
         obj.modifiers.remove(modifier)
 
 
+def _set_armature_parent_keep_transform(obj: bpy.types.Object, armature_obj: bpy.types.Object) -> None:
+    world_matrix = obj.matrix_world.copy()
+    obj.parent = armature_obj
+    obj.parent_type = "OBJECT"
+    obj.matrix_parent_inverse = armature_obj.matrix_world.inverted_safe()
+    obj.matrix_world = world_matrix
+
+
 def _clear_generated_groups(obj: bpy.types.Object, armature_obj: bpy.types.Object) -> None:
     bone_names = {bone.name for bone in armature_obj.data.bones}
     for group in list(obj.vertex_groups):
@@ -293,7 +301,7 @@ def _apply_split_front_hair_head_bridge(
 
     world_positions = [obj.matrix_world @ vertex.co for vertex in obj.data.vertices]
     if not world_positions:
-        return
+        return False
     object_x_values = [co.x for co in world_positions]
     object_z_values = [co.z for co in world_positions]
     object_top_z = max(object_z_values)
@@ -395,5 +403,6 @@ def bind_parts(
             bone_name = "root" if armature_obj.data.bones.get("root") else next(iter(armature_obj.data.bones)).name
         _assign_rigid(obj, bone_name)
         _smooth_weights(context, obj, OTHER_SMOOTH_REPEAT)
+        _set_armature_parent_keep_transform(obj, armature_obj)
 
     logger.info("Bound %s layer objects to %s", len(parts), armature_obj.name)

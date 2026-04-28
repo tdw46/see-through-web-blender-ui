@@ -8,7 +8,7 @@ from .. import properties
 from ..utils import blender as blender_utils
 from ..utils import env
 from ..utils.logging import get_logger
-from . import alpha_mesh_adapter, armature_builder, heuristic_rigger, part_classifier, psd_io, qremesh, weighting
+from . import alpha_mesh_adapter, armature_builder, heuristic_rigger, mtoon_materials, part_classifier, psd_io, qremesh, vrm_integration, weighting
 
 logger = get_logger("pipeline")
 ADDON_ID = env.addon_package_id(__package__)
@@ -156,6 +156,9 @@ def import_psd_scene(context: bpy.types.Context, filepath: str) -> list:
         remeshed_count = qremesh.remesh_parts(context, parts, qremesh.QRemeshSettings.from_scene_state(state))
         logger.info("Auto-remeshed %s imported layer objects", remeshed_count)
 
+    mtoon_count = mtoon_materials.configure_avatar_mtoon_materials(parts)
+    logger.info("Configured MToon material settings on %s imported layer materials", mtoon_count)
+
     state.source_psd_path = filepath
     properties.set_layer_items(scene, parts)
     state.remeshed_count = remeshed_count
@@ -202,6 +205,16 @@ def build_armature_scene(context: bpy.types.Context, *, bind_weights: bool = Fal
         edit_bone_offset=(0.0, 0.0, ground_offset_z),
     )
     state.armature_object_name = armature_obj.name
+    humanoid_count, spring_count = vrm_integration.setup_vrm1_avatar(
+        context,
+        armature_obj,
+    )
+    logger.info(
+        "Configured VRM 1.0 metadata on %s -> humanoid assignments=%s hair springs=%s",
+        armature_obj.name,
+        humanoid_count,
+        spring_count,
+    )
 
     if bind_weights:
         weighting.bind_parts(context, armature_obj, parts, rig_plan=rig_plan)
@@ -240,6 +253,8 @@ def remesh_imported_scene(context: bpy.types.Context, *, only_selected: bool = F
         qremesh.QRemeshSettings.from_scene_state(state),
         only_selected=only_selected,
     )
+    mtoon_count = mtoon_materials.configure_avatar_mtoon_materials(parts)
+    logger.info("Configured MToon material settings on %s remeshed layer materials", mtoon_count)
     properties.set_layer_items(scene, parts)
     state.remeshed_count = count
     state.last_report = f"Remeshed {count} imported layer objects"

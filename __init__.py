@@ -18,6 +18,8 @@ MODULES = [
     "core.part_classifier",
     "core.heuristic_rigger",
     "core.armature_builder",
+    "core.vrm_integration",
+    "core.mtoon_materials",
     "core.qremesh",
     "core.weighting",
     "core.pipeline",
